@@ -2,6 +2,7 @@ import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 from app import models  # noqa: F401  — регистрирует таблицы
 from app.config import settings
@@ -32,4 +33,11 @@ def root():
 
 @app.get("/api/health", tags=["Служебное"])
 def health():
-    return {"status": "ok"}
+    """Проверка работы: какая база подключена и отвечает ли она."""
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("select 1"))
+        db_ok = True
+    except Exception:
+        db_ok = False
+    return {"status": "ok" if db_ok else "db_error", "database": engine.dialect.name, "database_ok": db_ok}
