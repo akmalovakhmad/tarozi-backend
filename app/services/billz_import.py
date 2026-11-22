@@ -28,7 +28,7 @@ from app.services.stock import change_stock, get_level
 
 HOST = "https://api-admin.billz.ai"
 PAGE = 500
-STEPS = ("catalog", "staff", "people", "sales", "debts")
+STEPS = ("catalog", "staff", "people", "count", "sales", "debts")
 
 
 def _http(method: str, path: str, token: str | None = None, body: dict | None = None, params: dict | None = None) -> dict:
@@ -321,8 +321,46 @@ def step_people(db: Session, company: Company, token: str, rep: dict) -> None:
     db.flush()
 
 
-def step_sales(db: Session, company: Company, token: str, rep: dict, month: str) -> None:
-    """Чеки одного месяца: шапка и оплаты — из отчёта транзакций, товары — из отчёта покупок."""
+def _safe_pages(token, path, key, params, rep) -> list[dict]:
+    """Вспомогательные отчёты: если BILLZ их не отдаёт, работаем дальше по карточкам чеков."""
+    try:
+        return _pages(token, path, key, params)
+    except HTTPException as e:
+        rep.setdefault("warnings", []).append(f"{path}: {e.detail}")
+        return []
+
+
+def _order_search(token: str, rng: dict, rep: dict) -> list[dict]:
+    """Список чеков за период: GET /v3/order-search, чеки сгруппированы по дням."""
+    out, page = [], 1
+    while True:
+        r = fetch("GET", "/v3/order-search", token, params={**rng, "page": page, "limit": 100})
+        if isinstance(r.get("data"), dict):
+            r = r["data"]
+        if page == 1:
+            rep["probe"] = {"keys": sorted(r.keys())[:12], "count": r.get("count")}
+        got = []
+        for day in r.get("orders_sorted_by_date_list") or []:
+            got += day.get("orders") or []
+        got += r.get("orders") or []
+        out += got
+        total = int(r.get("count") or 0)
+        if not got or (total and len(out) >= total) or page >= 500:
+            return out
+        page += 1
+
+
+def _detail(token: str, oid: str) -> dict:
+    r = fetch("GET", f"/v2/order/{oid}", token)
+    return r["data"] if isinstance(r.get("data"), dict) and "order_detail" in r["data"] else r
+
+
+def step_sales(db: Session, company: Company, token: str, rep: dict, month: str, budget_s: float = 200) -> None:
+    """Чеки одного месяца. Список — /v3/order-search, товары — отчёт покупок, оплаты — отчёт транзакций;
+    чего нет в отчётах, берём из карточки чека /v2/order/{id}. Если время запроса на исходе — отдаём incomplete,
+    и интерфейс повторяет тот же месяц (уже перенесённые чеки пропускаются)."""
+    import time
+    t0 = time.monotonic()
     cid = company.id
     try:
         start = date.fromisoformat(month + "-01")
@@ -330,15 +368,15 @@ def step_sales(db: Session, company: Company, token: str, rep: dict, month: str)
         raise HTTPException(422, "Месяц укажите в виде ГГГГ-ММ")
     end = (start.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
     rng = {"start_date": start.isoformat(), "end_date": end.isoformat()}
-    rows = _pages(token, "/v1/transaction-report-table", "rows", rng)
-    rep["month"], rep["month_transactions"] = month, len(rows)
-    if not rows:
+    orders = _order_search(token, rng, rep)
+    rep["month"], rep["month_transactions"], rep["incomplete"] = month, len(orders), False
+    if not orders:
         return
-    lines: dict[str, list] = {}
-    for ln in _pages(token, "/v1/customer-purchases-table", "purchases", {**rng, "with_customers": "false"}):
-        lines.setdefault(ln.get("order_id"), []).append(ln)
 
-    stores = {s.external_id: s.id for s in db.scalars(select(Store).where(Store.company_id == cid, Store.external_id.isnot(None)))}
+    stores_all = list(db.scalars(select(Store).where(Store.company_id == cid)))
+    stores = {s.external_id: s.id for s in stores_all if s.external_id}
+    stores_by_name = {s.name.strip().lower(): s.id for s in stores_all}
+    default_store = next(iter(stores.values()), None) or (stores_all[0].id if stores_all else None)
     users = {u.external_id: u.id for u in db.scalars(select(User).where(User.company_id == cid, User.external_id.isnot(None)))}
     owner = db.scalar(select(User.id).where(User.company_id == cid, User.is_owner.is_(True)).order_by(User.id))
     clients = {c.external_id: c.id for c in db.scalars(select(Client).where(Client.company_id == cid, Client.external_id.isnot(None)))}
@@ -346,71 +384,132 @@ def step_sales(db: Session, company: Company, token: str, rep: dict, month: str)
     p_ext = {p.external_id: p for p in prods if p.external_id}
     p_sku = {p.sku: p for p in prods if p.sku}
     p_bar = {p.barcode: p for p in prods if p.barcode}
-    ids = [r.get("order_id") for r in rows if r.get("order_id")]
-    done = set(db.scalars(select(Sale.external_id).where(Sale.company_id == cid, Sale.external_id.in_(ids)))) if ids else set()
-    default_store = next(iter(stores.values()), None) or db.scalar(select(Store.id).where(Store.company_id == cid).order_by(Store.id))
+    ids = [o.get("id") for o in orders if o.get("id")]
+    parent_ids = [o.get("parent_id") for o in orders if o.get("parent_id")]
+    known = {s.external_id: s for s in db.scalars(select(Sale).where(Sale.company_id == cid, Sale.external_id.in_(ids + parent_ids)))} if ids else {}
+    done_returns = set(db.scalars(select(SaleReturn.external_id).where(SaleReturn.company_id == cid, SaleReturn.external_id.in_(ids)))) if ids else set()
 
-    def product_for(ln) -> Product:
-        p = p_ext.get(ln.get("product_id")) or p_sku.get(ln.get("product_sku") or "") or p_bar.get(ln.get("product_barcode") or "")
-        if not p:  # товар уже удалён в BILLZ — заводим архивную карточку, чтобы история не потерялась
-            p = Product(company_id=cid, name=(ln.get("product_name") or "Товар из BILLZ")[:300], external_id=ln.get("product_id"),
-                        unit=(ln.get("product_measurement_unit_short_name") or "шт")[:20], is_active=False)
+    todo = [o for o in orders if o.get("id") and o["id"] not in known and o["id"] not in done_returns]
+    todo.sort(key=lambda o: str(o.get("sold_at") or o.get("finished_at") or o.get("created_at") or ""))  # исходный чек раньше возврата
+    rep["sales_skipped"] += len(orders) - len(todo)
+    if not todo:
+        return
+    lines: dict[str, list] = {}
+    for ln in _safe_pages(token, "/v1/customer-purchases-table", "purchases", {**rng, "with_customers": "false"}, rep):
+        lines.setdefault(ln.get("order_id"), []).append(ln)
+    trx = {r.get("order_id"): r for r in _safe_pages(token, "/v1/transaction-report-table", "rows", rng, rep)}
+
+    def product_for(pid, name, sku=None, bar=None, unit=None) -> Product:
+        p = p_ext.get(pid) or (p_sku.get(sku) if sku else None) or (p_bar.get(bar) if bar else None)
+        if not p:  # товар удалён в BILLZ — архивная карточка, чтобы история не потерялась
+            p = Product(company_id=cid, name=(name or "Товар из BILLZ")[:300], external_id=pid, unit=(unit or "шт")[:20], is_active=False)
             db.add(p)
             db.flush()
-            p_ext[p.external_id] = p
+            if pid:
+                p_ext[pid] = p
         return p
 
-    for r in rows:
-        oid = r.get("order_id")
-        if not oid or oid in done:
-            rep["sales_skipped"] += 1
-            continue
-        done.add(oid)
-        kind = (r.get("order_type") or "SALE").upper()
-        when = _when(r.get("date"), company.utc_offset_minutes) or datetime.combine(start, datetime.min.time())
-        sellers = [users[s] for s in r.get("seller_ids") or [] if s in users]
-        cashier = users.get(r.get("cashier_id"))
+    q2 = Decimal("0.01")
+    for o in todo:
+        if time.monotonic() - t0 > budget_s:
+            rep["incomplete"] = True
+            break
+        oid = o["id"]
+        det = o.get("order_detail") or {}
+        kind = (o.get("order_type") or "SALE").upper()
+        items, pays = [], []
+        for ln in lines.get(oid) or []:
+            qty = abs(_dec(ln.get("sold_measurement_value")) or _dec(ln.get("returned_measurement_value")))
+            if not qty:
+                continue
+            gross, net = abs(_dec(ln.get("gross_sales"))), abs(_dec(ln.get("net_sales")))
+            items.append(dict(p=product_for(ln.get("product_id"), ln.get("product_name"), ln.get("product_sku"), ln.get("product_barcode"),
+                                            ln.get("product_measurement_unit_short_name")),
+                              name=ln.get("product_name"), qty=qty, gross=gross, net=net or gross, cost=abs(_dec(ln.get("net_sold_supply_sum")))))
+        t = trx.get(oid)
+        if t:
+            pays = [(_method(pm.get("payment_type_name")), abs(_dec(pm.get("sum")))) for pm in t.get("payments") or []]
+        if not items or not pays:
+            try:
+                full = _detail(token, oid)
+            except HTTPException:
+                full = {}
+            fd = full.get("order_detail") or {}
+            det = {**det, **{k: v for k, v in fd.items() if v not in (None, "", [])}}
+            if not items:
+                for it in fd.get("order_items") or []:
+                    qty = abs(_dec(it.get("measurement_value")))
+                    if not qty:
+                        continue
+                    pr = it.get("product") or {}
+                    total = abs(_dec(it.get("total_price")))
+                    gross = abs(_dec(it.get("retail_price"))) * qty or total + abs(_dec(it.get("discount_amount")))
+                    items.append(dict(p=product_for(pr.get("id") or it.get("product_id"), pr.get("name") or it.get("name"), pr.get("sku") or it.get("sku"),
+                                                    pr.get("barcode") or it.get("barcode"), (pr.get("measurement_unit") or {}).get("short_name")),
+                                      name=pr.get("name") or it.get("name"), qty=qty, gross=max(gross, total), net=total,
+                                      cost=abs(_dec(it.get("supply_price"))) * qty))
+            if not pays:
+                pays = [(_method((pm.get("company_payment_type") or {}).get("name")), abs(_dec(pm.get("paid_amount"))) - abs(_dec(pm.get("returned_amount"))))
+                        for pm in fd.get("order_payments") or []]
+                if _dec(full.get("debt")) > 0 and not any(m == "debt" for m, _ in pays):
+                    pays.append(("debt", _dec(full.get("debt"))))
+        when = (_when(o.get("sold_at") or o.get("finished_at") or o.get("created_at_utc"), 0) if (o.get("sold_at") or o.get("finished_at") or o.get("created_at_utc"))
+                else _when(o.get("created_at") or (t or {}).get("date"), company.utc_offset_minutes)) or datetime.combine(start, datetime.min.time())
+        cashier = users.get((det.get("user") or {}).get("id") or det.get("user_id"))
+        sellers = [users[x] for x in (t or {}).get("seller_ids") or [] if x in users]
         seller = (sellers[0] if sellers else None) or cashier or owner
-        num_raw = str((lines.get(oid) or [{}])[0].get("order_number") or r.get("external_id") or "")
+        shop = det.get("shop") or {}
+        store_id = stores.get(shop.get("id") or det.get("shop_id")) or stores.get((t or {}).get("shop_id")) \
+            or stores_by_name.get((shop.get("name") or "").strip().lower()) or default_store
+        cust = o.get("customer_id") or (det.get("customer") or {}).get("id") or (t or {}).get("customer_id")
+        total = sum((a for _, a in pays if a > 0), Decimal(0)) or sum((i["net"] for i in items), Decimal(0)) or abs(_dec(det.get("total_price")))
+        sub = max(sum((i["gross"] for i in items), Decimal(0)), total)
+
+        parent = known.get(o.get("parent_id"))
+        if kind == "RETURN" and parent is not None:
+            # возврат по чеку, который уже перенесён: отмечаем возврат на исходном чеке
+            ret_items = []
+            for i in items:
+                si = next((x for x in parent.items if x.product_id == i["p"].id and Decimal(x.qty) > Decimal(x.returned_qty)), None)
+                if si:
+                    si.returned_qty = min(Decimal(si.qty), Decimal(si.returned_qty) + i["qty"])
+                    ret_items.append({"sale_item_id": si.id, "qty": float(i["qty"]), "amount": float(i["net"])})
+            parent.returned_total = Decimal(parent.returned_total) + total
+            db.add(SaleReturn(company_id=cid, sale_id=parent.id, store_id=store_id or parent.store_id, user_id=cashier or seller,
+                              amount=total, refund_method=pays[0][0] if pays else "cash", reason="Возврат из BILLZ",
+                              created_at=when, items=ret_items, external_id=oid))
+            known[oid] = parent
+            rep["returns_created"] += 1
+            continue
+
+        num_raw = str(o.get("order_number") or "")
         number = int(num_raw) if num_raw.isdigit() and len(num_raw) < 10 else None
         if number is None:
             company.receipt_counter += 1
             number = company.receipt_counter
         company.receipt_counter = max(company.receipt_counter, number)
-        sale = Sale(company_id=cid, number=number, store_id=stores.get(r.get("shop_id")) or default_store, seller_id=seller,
-                    created_by=cashier or seller, client_id=clients.get(r.get("customer_id")), external_id=oid,
-                    status="return" if kind == "RETURN" else "completed", comment=(r.get("comment") or None), created_at=when)
-        sub = tot = Decimal(0)
-        for ln in lines.get(oid) or []:
-            qty = _dec(ln.get("sold_measurement_value")) or _dec(ln.get("returned_measurement_value"))
-            if not qty:
-                continue
-            gross, net = abs(_dec(ln.get("gross_sales"))), abs(_dec(ln.get("net_sales")))
-            net = net or gross
-            p = product_for(ln)
-            sale.items.append(SaleItem(product_id=p.id, name=(ln.get("product_name") or p.name)[:300], is_service=p.is_service,
-                                       qty=abs(qty), price=(gross / abs(qty)).quantize(Decimal("0.01")),
-                                       cost_price=(abs(_dec(ln.get("net_sold_supply_sum"))) / abs(qty)).quantize(Decimal("0.01")),
-                                       discount=max(gross - net, Decimal(0)), total=net))
-            sub += gross
-            tot += net
-        pays = [(_method(pm.get("payment_type_name")), abs(_dec(pm.get("sum")))) for pm in r.get("payments") or []]
-        paid = sum((a for _, a in pays), Decimal(0))
-        tot = paid or tot or abs(_dec(r.get("gross_sales")))
-        sub = max(sub, abs(_dec(r.get("total_price"))), tot)
-        sale.subtotal, sale.total, sale.discount = sub, tot, max(sub - tot, Decimal(0))
+        sale = Sale(company_id=cid, number=number, store_id=store_id, seller_id=seller, created_by=cashier or seller,
+                    client_id=clients.get(cust), external_id=oid, status="return" if kind == "RETURN" else "completed",
+                    comment=(det.get("comment") or None), created_at=when, subtotal=sub, total=total, discount=max(sub - total, Decimal(0)))
+        for i in items:
+            sale.items.append(SaleItem(product_id=i["p"].id, name=(i["name"] or i["p"].name)[:300], is_service=i["p"].is_service,
+                                       qty=i["qty"], price=(i["gross"] / i["qty"]).quantize(q2), cost_price=(i["cost"] / i["qty"]).quantize(q2),
+                                       discount=max(i["gross"] - i["net"], Decimal(0)), total=i["net"]))
         for m, a in pays:
-            if a:
+            if a > 0:
                 sale.payments.append(Payment(method=m, amount=a))
         db.add(sale)
         db.flush()
+        known[oid] = sale
         if kind == "RETURN":
-            db.add(SaleReturn(company_id=cid, sale_id=sale.id, store_id=sale.store_id, user_id=cashier or seller, amount=tot,
+            db.add(SaleReturn(company_id=cid, sale_id=sale.id, store_id=sale.store_id, user_id=cashier or seller, amount=total,
                               refund_method=pays[0][0] if pays else "cash", reason="Возврат из BILLZ", created_at=when,
-                              items=[{"sale_item_id": i.id, "qty": float(i.qty), "amount": float(i.total)} for i in sale.items]))
+                              items=[{"sale_item_id": x.id, "qty": float(x.qty), "amount": float(x.total)} for x in sale.items]))
             rep["returns_created"] += 1
         else:
             rep["sales_created"] += 1
+        if (rep["sales_created"] + rep["returns_created"]) % 200 == 0:
+            db.commit()  # промежуточное сохранение: при обрыве повтор продолжит с этого места
 
 
 def step_debts(db: Session, company: Company, token: str, rep: dict) -> None:
@@ -469,7 +568,14 @@ def run(db: Session, company_id: int, secret_token: str, step: str = "all", mont
     for s in todo:
         if s == "people" and not import_clients:
             continue
-        if s == "sales":
+        if s == "count":  # сколько чеков за месяц — чтобы найти, с какого месяца начинается история
+            m = date.fromisoformat((month or date.today().strftime("%Y-%m")) + "-01")
+            end = (m.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+            r = fetch("GET", "/v3/order-search", token, params={"start_date": m.isoformat(), "end_date": end.isoformat(), "page": 1, "limit": 1})
+            r = r["data"] if isinstance(r.get("data"), dict) else r
+            n = int(r.get("count") or 0) or sum(len(d.get("orders") or []) for d in r.get("orders_sorted_by_date_list") or [])
+            rep["month"], rep["month_transactions"] = m.strftime("%Y-%m"), n
+        elif s == "sales":
             step_sales(db, company, token, rep, month or date.today().strftime("%Y-%m"))
         else:
             globals()["step_" + s](db, company, token, rep)

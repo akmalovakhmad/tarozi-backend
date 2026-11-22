@@ -1559,14 +1559,23 @@ async function viewSettings(v) {
       for (const [step, label] of [['catalog', 'Товары, остатки, магазины'], ['staff', 'Сотрудники'], ['people', 'Клиенты и поставщики']]) {
         const p = line(label + '…'); add(await call(step)); p.textContent = label + ' — готово';
       }
-      const ps = line('Продажи…'); let empty = 0, sales = 0;
+      const ps = line('Ищу, с какого месяца начинается история продаж…'); let empty = 0, sales = 0, months = [];
       const dt = new Date(); dt.setDate(1);
-      for (let i = 0; i < 120 && empty < 12; i++) {
-        const mon = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`;
-        ps.textContent = `Продажи: ${mon}… перенесено чеков ${sales}`;
-        const r = await call('sales', mon); add(r);
-        sales += r.sales_created + r.returns_created; empty = r.month_transactions ? 0 : empty + 1;
+      const ym = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      for (let i = 0; i < 180 && empty < 12; i++) {
+        const mon = ym(dt), r = await call('count', mon);
+        if (r.month_transactions) { months.unshift(mon); empty = 0; } else empty++;
+        ps.textContent = `Ищу начало истории: ${mon}, месяцев с продажами — ${months.length}`;
         dt.setMonth(dt.getMonth() - 1);
+      }
+      if (!months.length) (tot.notes ||= new Set()).add('BILLZ не отдал ни одного чека. Проверьте, что у ключа есть доступ на чтение продаж, и запустите перенос ещё раз.');
+      for (const [i, mon] of months.entries()) {
+        let r;
+        do {
+          ps.textContent = `Продажи: ${mon} (${i + 1} из ${months.length}), перенесено чеков ${sales}`;
+          r = await call('sales', mon); add(r); sales += r.sales_created + r.returns_created;
+        } while (r.incomplete);
+        if (r.warnings) r.warnings.forEach(w => (tot.notes ||= new Set()).add('BILLZ: ' + w));
       }
       ps.textContent = `Продажи — готово, перенесено чеков: ${sales}`;
       const pd = line('Долги клиентов…'); add(await call('debts')); pd.textContent = 'Долги клиентов — готово';

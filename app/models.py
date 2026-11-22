@@ -329,6 +329,7 @@ class SaleReturn(Base):
     items: Mapped[list] = mapped_column(JSON, default=list)  # [{sale_item_id, qty, amount}]
     reason: Mapped[str | None] = mapped_column(String(300))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+    external_id: Mapped[str | None] = mapped_column(String(64), index=True)  # id чека возврата в BILLZ (перенос данных)
 
 
 class Target(Base):

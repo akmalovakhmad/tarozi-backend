@@ -153,6 +153,23 @@ def test_billz_import(client, monkeypatch):
                                              "gender": "male", "birth_date": "1990-05-14", "balance": 15}]}
         if path == "/v1/supplier":
             return {"count": 1, "suppliers": [{"id": "sp1", "name": "ООО Стиль", "debt_value": 500, "phone_numbers": ["998711234567"]}]}
+        if path == "/v3/order-search":
+            if params["start_date"] != "2026-10-01":
+                return {"count": 0, "orders_sorted_by_date_list": []}
+            return {"count": 3, "orders_sorted_by_date_list": [
+                {"date": "2026-10-05", "orders": [{"id": "o1", "order_number": "1042", "order_type": "SALE", "customer_id": "k1",
+                                                   "sold_at": "2026-10-05T09:30:00Z", "order_detail": {"user": {"id": "u1"}, "shop": {"id": "s1"}}}]},
+                {"date": "2026-10-06", "orders": [{"id": "o2", "parent_id": "o1", "order_number": "1043", "order_type": "RETURN",
+                                                   "sold_at": "2026-10-06T05:00:00Z", "order_detail": {"shop": {"id": "s1"}}},
+                                                  {"id": "o3", "order_number": "1044", "order_type": "SALE",
+                                                   "sold_at": "2026-10-06T06:00:00Z", "order_detail": {"shop": {"id": "s1"}}}]}]}
+        if path.startswith("/v2/order/"):
+            oid = path.rsplit("/", 1)[1]
+            if oid == "o3":
+                return {"id": "o3", "debt": 0, "order_detail": {"order_items": [
+                    {"product": {"id": "p1", "name": "Pomade Red"}, "measurement_value": 1, "retail_price": 100, "total_price": 100, "supply_price": 36}],
+                    "order_payments": [{"company_payment_type": {"name": "Uzcard"}, "paid_amount": 100, "returned_amount": 0}]}}
+            return {"id": oid, "order_detail": {"order_payments": [{"company_payment_type": {"name": "Наличные"}, "paid_amount": 90}]}}
         if path == "/v1/transaction-report-table":
             if params["start_date"] != "2026-10-01":
                 return {"rows": []}
@@ -182,7 +199,7 @@ def test_billz_import(client, monkeypatch):
         r = client.post("/api/import/billz", json={"secret_token": tok, "step": step}, headers=h)
         assert r.status_code == 200, r.text
     r = client.post("/api/import/billz", json={"secret_token": tok, "step": "sales", "month": "2026-10"}, headers=h).json()
-    assert r["sales_created"] == 1 and r["returns_created"] == 1 and r["month_transactions"] == 2
+    assert r["sales_created"] == 2 and r["returns_created"] == 1 and r["month_transactions"] == 3, r
     empty = client.post("/api/import/billz", json={"secret_token": tok, "step": "sales", "month": "2026-09"}, headers=h).json()
     assert empty["month_transactions"] == 0
     d = client.post("/api/import/billz", json={"secret_token": tok, "step": "debts"}, headers=h).json()
@@ -204,6 +221,9 @@ def test_billz_import(client, monkeypatch):
     # повторный перенос ничего не дублирует
     client.post("/api/import/billz", json={"secret_token": tok, "step": "catalog"}, headers=h)
     again = client.post("/api/import/billz", json={"secret_token": tok, "step": "sales", "month": "2026-10"}, headers=h).json()
-    assert again["sales_created"] == 0 and again["sales_skipped"] == 2
+    assert again["sales_created"] == 0 and again["sales_skipped"] == 3
+    s3 = [x for x in items if x["number"] == 1044][0]
+    assert s3["total"] == 100 and s3["payments"][0]["method"] == "card" and s3["items"][0]["qty"] == 1
+    assert s["items"][0]["returned_qty"] == 1
     d2 = client.post("/api/import/billz", json={"secret_token": tok, "step": "debts"}, headers=h).json()
     assert d2["debts_created"] == 0 and d2["debts_updated"] == 1
