@@ -270,9 +270,11 @@ def test_billz_catalog_pages(client, monkeypatch):
             return {"count": 1, "shops": [{"id": "s1", "name": "Склад"}]}
         if path == "/v2/category":
             return {"count": 0, "categories": []}
-        if path == "/v2/products":
-            st = (params["page"] - 1) * 100
-            return {"count": 150, "products": data[st:st + 100]}
+        if path == "/v2/product-search-with-filters":
+            st = (body["page"] - 1) * 100
+            return {"count": 150, "products": [{**d, "shop_prices": [{"shop_id": "s1", "retail_price": 20, "wholesale_price": 15}],
+                                                "shop_measurement_values": [{"shop_id": "s1", "total_active_measurement_value": 3}]}
+                                               for d in data[st:st + 100]]}
         return {}
     monkeypatch.setattr(billz_import, "fetch", fake)
     h = register(client)
@@ -281,4 +283,5 @@ def test_billz_catalog_pages(client, monkeypatch):
     r2 = client.post("/api/import/billz", json={"secret_token": "good-token-1234567890", "step": "catalog", "page": 2}, headers=h).json()
     assert r2["next_page"] is None and r2["products_created"] == 50
     p = client.get("/api/products?q=S149", headers=h).json()["items"][0]
-    assert p["retail_price"] == 20 and p["cost_price"] == 10 and p["stock_total"] == 3
+    assert p["retail_price"] == 20 and p["cost_price"] == 10 and p["stock_total"] == 3 and p["wholesale_price"] == 15
+    assert r1["stock_stores"] == ["Чиланзар"]  # единственный магазин тут и в BILLZ — связались, а не задвоились

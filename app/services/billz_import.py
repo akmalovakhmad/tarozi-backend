@@ -147,7 +147,11 @@ def _shop_map(db: Session, token: str, company_id: int, rep: dict) -> dict[str, 
     stores = {s.name.strip().lower(): s for s in db.scalars(select(Store).where(Store.company_id == company_id))}
     ext = {s.external_id: s for s in stores.values() if s.external_id}
     out = {}
-    for sh in _pages(token, "/v1/shop", "shops"):
+    shops = _pages(token, "/v1/shop", "shops")
+    unlinked = [s for s in stores.values() if not s.external_id]
+    if len(shops) == 1 and not ext and len(unlinked) == 1:
+        ext[shops[0].get("id")] = unlinked[0]  # один магазин тут и один в BILLZ — это один и тот же магазин
+    for sh in shops:
         name = (sh.get("name") or "Магазин").strip()
         st = ext.get(sh.get("id")) or stores.get(name.lower())
         if not st:
@@ -183,8 +187,17 @@ def step_catalog(db: Session, company: Company, token: str, rep: dict, page: int
     cat_map = {c.external_id: c.id for c in db.scalars(select(Category).where(Category.company_id == cid, Category.external_id.isnot(None)))}
 
     lim = 100
-    r = fetch("GET", "/v2/products", token, params={"page": page, "limit": lim})
-    rows, total = _items(r, "products")
+    try:  # полный поиск отдаёт оптовые цены и остатки по магазинам; простой список /v2/products — запасной вариант
+        r = fetch("POST", "/v2/product-search-with-filters", token,
+                  body={"page": page, "limit": lim, "status": "all", "group_variations": False, "archived_list": False})
+        rows, total = _items(r, "products")
+        rep["catalog_source"] = "search"
+        if not rows:
+            raise HTTPException(404, "пусто")
+    except HTTPException:
+        r = fetch("GET", "/v2/products", token, params={"page": page, "limit": lim})
+        rows, total = _items(r, "products")
+        rep["catalog_source"] = "list"
     rep["billz_products"] = total
     rep["next_page"] = page + 1 if rows and (page * lim < total if total else len(rows) >= lim) else None
 
@@ -195,6 +208,8 @@ def step_catalog(db: Session, company: Company, token: str, rep: dict, page: int
     todo = []
     for bp in rows:
         has_data = bp.get("shop_measurement_values") or any(_dec(x.get("retail_price")) for x in bp.get("shop_prices") or [])
+        if bp.get("variations") and not has_data:
+            continue  # родитель с вложенными вариациями
         if bp.get("is_variative") and not has_data and not bp.get("sku") and not bp.get("barcode"):
             continue  # пустая карточка-родитель вариаций; сами вариации приходят отдельными товарами
         name = (bp.get("name") or "").strip()
@@ -238,7 +253,8 @@ def step_catalog(db: Session, company: Company, token: str, rep: dict, page: int
         for sv in bp.get("shop_measurement_values") or []:
             sid = shop_map.get(sv.get("shop_id"))
             if sid:
-                v = sv.get("active_measurement_value", sv.get("total_active_measurement_value"))
+                v = next((sv[k] for k in ("active_measurement_value", "total_active_measurement_value", "total_measurement_value",
+                                          "measurement_value") if sv.get(k) is not None), 0)
                 levels[sid] = levels.get(sid, Decimal(0)) + _dec(v)
         if not levels:  # остатки только в разрезе поставщиков
             for sv in bp.get("product_supplier_stock") or []:
@@ -259,6 +275,8 @@ def step_catalog(db: Session, company: Company, token: str, rep: dict, page: int
                 lv = StockLevel(product_id=p.id, store_id=sid, qty=Decimal(0))
                 db.add(lv)
                 have[(p.id, sid)] = lv
+            if target:
+                rep.setdefault("stock_store_ids", set()).add(sid)
             delta = target - Decimal(lv.qty or 0)
             if delta:
                 lv.qty = target
@@ -645,5 +663,7 @@ def run(db: Session, company_id: int, secret_token: str, step: str = "all", mont
             step_sales(db, company, token, rep, month or date.today().strftime("%Y-%m"))
         else:
             globals()["step_" + s](db, company, token, rep)
+    if rep.get("stock_store_ids"):
+        rep["stock_stores"] = sorted(st.name for st in db.scalars(select(Store).where(Store.id.in_(rep.pop("stock_store_ids")))))
     db.commit()
     return rep

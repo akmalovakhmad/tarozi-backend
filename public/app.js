@@ -1552,7 +1552,7 @@ async function viewSettings(v) {
     const btn = $('button[type=submit]', m.el), log = $('#bzLog', m.el), key = d.secret_token.trim();
     const tot = {}; log.hidden = false; log.innerHTML = '';
     const line = t => { const p = document.createElement('p'); p.textContent = t; log.append(p); return p; };
-    const add = r => { for (const [k, v] of Object.entries(r)) if (typeof v === 'number' && !['month_transactions', 'billz_products', 'next_page'].includes(k)) tot[k] = (tot[k] || 0) + v; (r.notes || []).forEach(n => (tot.notes ||= new Set()).add(n)); };
+    const add = r => { for (const [k, v] of Object.entries(r)) if (typeof v === 'number' && !['month_transactions', 'billz_products', 'next_page'].includes(k)) tot[k] = (tot[k] || 0) + v; (r.notes || []).forEach(n => (tot.notes ||= new Set()).add(n)); (r.stock_stores || []).forEach(n => (tot.stockStores ||= new Set()).add(n)); };
     const call = (step, month, page) => api('/api/import/billz', { method: 'POST', body: { secret_token: key, step, month, page } });
     btn.textContent = 'Переношу…';
     try {
@@ -1593,6 +1593,7 @@ async function viewSettings(v) {
         <p>Клиентов: новых <b>${tot.clients_created || 0}</b>, обновлено <b>${tot.clients_updated || 0}</b>; долгов: <b>${(tot.debts_created || 0) + (tot.debts_updated || 0)}</b></p>
         <p>Поставщиков: <b>${(tot.suppliers_created || 0) + (tot.suppliers_updated || 0)}</b>, сотрудников: <b>${tot.staff_created || 0}</b></p>
         <p>Магазинов создано: <b>${tot.stores_created || 0}</b>, категорий: <b>${tot.categories_created || 0}</b></p>
+        ${tot.stockStores ? `<p>Остатки записаны в магазины: <b>${[...tot.stockStores].map(esc).join(', ')}</b>. Остаток в списке товаров показывается по магазину, выбранному слева вверху.</p>` : ''}
         ${tot.notes ? `<p class="muted">${[...tot.notes].map(esc).join('<br>')}</p>` : ''}</div>`);
       S.stores = (await api('/api/stores')).filter(x => x.is_active); renderShell(); route();
     } catch (x) { line('Остановлено: ' + x.message + '. Запустите перенос ещё раз — уже перенесённое не задвоится.'); throw x; }
