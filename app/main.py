@@ -9,8 +9,8 @@ from sqlalchemy import text
 
 from app import models  # noqa: F401  — регистрирует таблицы
 from app.config import settings
-from app.db import Base, engine
-from app.routers import auth, clients, marketing, products, reports, sales, settings as settings_router, staff, stock
+from app.db import Base, SessionLocal, auto_migrate, engine
+from app.routers import auth, clients, debts, marketing, products, reports, sales, settings as settings_router, staff, stock
 
 
 if settings.secret_key.startswith("dev-only"):
@@ -18,6 +18,11 @@ if settings.secret_key.startswith("dev-only"):
 # Таблицы создаются при старте (и на каждом холодном старте на Vercel — это безопасно).
 # Для изменений структуры базы в продакшене подключите миграции Alembic (см. README).
 Base.metadata.create_all(engine)
+_added = auto_migrate(engine, Base.metadata)  # новые колонки в уже существующих таблицах
+if _added:
+    logging.getLogger("uvicorn.error").info("Добавлены колонки: %s", ", ".join(_added))
+with SessionLocal() as _db:
+    debts.sync_legacy_debts(_db)
 
 
 app = FastAPI(title="Тарози API", version="0.1.0",
@@ -25,7 +30,7 @@ app = FastAPI(title="Тарози API", version="0.1.0",
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=False,
                    allow_methods=["*"], allow_headers=["*"])
 
-for r in (auth, settings_router, staff, products, stock, sales, clients, marketing, reports):
+for r in (auth, settings_router, staff, products, stock, sales, clients, debts, marketing, reports):
     app.include_router(r.router)
 
 

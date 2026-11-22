@@ -32,3 +32,8 @@ def change_stock(db: Session, *, company_id: int, product: Product, store_id: in
     db.add(StockMovement(company_id=company_id, product_id=product.id, store_id=store_id, delta=delta,
                          reason=reason, ref_id=ref_id, user_id=user_id))
     return level
+
+
+def doc_total(doc) -> Decimal:
+    """Сумма документа по ценам в строках (для заказа и возврата поставщику — закупочные цены)."""
+    return sum((Decimal(i.qty) * Decimal(i.price or 0) for i in doc.items), Decimal("0"))

@@ -10,11 +10,12 @@ from sqlalchemy.orm import Session
 
 from app.common import apply_patch, get_owned, get_store
 from app.db import get_db
-from app.models import Category, Company, Product, StockLevel, StockMovement, Supplier, User
+from app.models import Category, Company, Product, StockDocument, StockLevel, StockMovement, Supplier, SupplierPayment, User
 from app.schemas import (CatalogStats, CategoryIn, CategoryOut, ImportResult, MovementOut, Page, ProductIn,
-                         ProductOut, ProductPatch, SupplierIn, SupplierOut)
+                         ProductOut, ProductPatch, SupplierIn, SupplierOut, SupplierPaymentIn, SupplierPaymentOut,
+                         SupplierStatsOut)
 from app.security import require
-from app.services.stock import change_stock
+from app.services.stock import change_stock, doc_total
 
 router = APIRouter(prefix="/api", tags=["Товары"])
 
@@ -47,9 +48,46 @@ def update_category(cat_id: int, data: CategoryIn, user: User = Depends(require(
     return cat
 
 
-@router.get("/suppliers", response_model=list[SupplierOut])
+@router.get("/suppliers", response_model=list[SupplierStatsOut])
 def list_suppliers(user: User = Depends(require("products.read")), db: Session = Depends(get_db)):
-    return db.scalars(select(Supplier).where(Supplier.company_id == user.company_id).order_by(Supplier.name)).all()
+    """Поставщики с суммой заказов, возвратов, оплат и нашим долгом перед ними."""
+    sups = db.scalars(select(Supplier).where(Supplier.company_id == user.company_id).order_by(Supplier.name)).all()
+    docs = db.scalars(select(StockDocument).where(StockDocument.company_id == user.company_id, StockDocument.status == "completed",
+                                                 StockDocument.kind.in_(["supplier_order", "supplier_return"]),
+                                                 StockDocument.supplier_id.isnot(None))).all()
+    paid = dict(db.execute(select(SupplierPayment.supplier_id, func.sum(SupplierPayment.amount))
+                           .where(SupplierPayment.company_id == user.company_id).group_by(SupplierPayment.supplier_id)).all())
+    out = []
+    for sp in sups:
+        orders = sum((doc_total(d) for d in docs if d.supplier_id == sp.id and d.kind == "supplier_order"), Decimal(0))
+        rets = sum((doc_total(d) for d in docs if d.supplier_id == sp.id and d.kind == "supplier_return"), Decimal(0))
+        items = sum((Decimal(i.qty) for d in docs if d.supplier_id == sp.id and d.kind == "supplier_order" for i in d.items), Decimal(0))
+        pd = Decimal(paid.get(sp.id) or 0)
+        out.append(SupplierStatsOut(id=sp.id, name=sp.name, phone=sp.phone, note=sp.note, orders_total=orders, returns_total=rets,
+                                    paid_total=pd, debt=orders - rets - pd, items_count=items))
+    return out
+
+
+@router.get("/suppliers/{sup_id}/payments", response_model=list[SupplierPaymentOut])
+def supplier_payments(sup_id: int, user: User = Depends(require("stock.manage")), db: Session = Depends(get_db)):
+    get_owned(db, Supplier, sup_id, user, "Поставщик")
+    return db.scalars(select(SupplierPayment).where(SupplierPayment.supplier_id == sup_id).order_by(SupplierPayment.id.desc())).all()
+
+
+@router.post("/suppliers/{sup_id}/payments", response_model=SupplierPaymentOut, status_code=201)
+def add_supplier_payment(sup_id: int, data: SupplierPaymentIn, user: User = Depends(require("stock.manage")),
+                         db: Session = Depends(get_db)):
+    """Оплата поставщику — целиком за заказ или частично, можно без привязки к заказу."""
+    get_owned(db, Supplier, sup_id, user, "Поставщик")
+    if data.document_id:
+        doc = get_owned(db, StockDocument, data.document_id, user, "Заказ")
+        if doc.supplier_id != sup_id or doc.kind != "supplier_order":
+            raise HTTPException(422, "Этот заказ относится к другому поставщику")
+    p = SupplierPayment(company_id=user.company_id, supplier_id=sup_id, document_id=data.document_id, amount=data.amount,
+                        method=data.method, note=data.note, user_id=user.id)
+    db.add(p)
+    db.commit()
+    return p
 
 
 @router.post("/suppliers", response_model=SupplierOut, status_code=201)

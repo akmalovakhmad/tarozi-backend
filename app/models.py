@@ -26,6 +26,7 @@ class Company(Base):
     allow_negative_stock: Mapped[bool] = mapped_column(Boolean, default=False)
     receipt_counter: Mapped[int] = mapped_column(Integer, default=0)
     utc_offset_minutes: Mapped[int] = mapped_column(Integer, default=300)  # часовой пояс для отчётов (Ташкент = +5)
+    debt_days_default: Mapped[int | None] = mapped_column(Integer, default=30)  # срок долга по умолчанию, дней
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 
@@ -92,6 +93,7 @@ class Product(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     cost_price: Mapped[Decimal] = mapped_column(Money, default=Decimal("0"))
     retail_price: Mapped[Decimal] = mapped_column(Money, default=Decimal("0"))
+    wholesale_price: Mapped[Decimal | None] = mapped_column(Money)  # оптовая цена (если пусто — продаём по рознице)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 
@@ -169,7 +171,23 @@ class Client(Base):
     bonus_balance: Mapped[Decimal] = mapped_column(Money, default=Decimal("0"))
     debt_balance: Mapped[Decimal] = mapped_column(Money, default=Decimal("0"))
     sms_allowed: Mapped[bool] = mapped_column(Boolean, default=True)
+    gender: Mapped[str | None] = mapped_column(String(1))  # m / f
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class ClientDebt(Base):
+    """Отдельный долг клиента: возникает при продаже в долг, у него есть срок и статус."""
+    __tablename__ = "client_debts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("companies.id"), index=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id"), index=True)
+    sale_id: Mapped[int | None] = mapped_column(ForeignKey("sales.id"), index=True)
+    store_id: Mapped[int | None] = mapped_column(ForeignKey("stores.id"))
+    amount: Mapped[Decimal] = mapped_column(Money)
+    paid: Mapped[Decimal] = mapped_column(Money, default=Decimal("0"))
+    due_date: Mapped[date | None] = mapped_column(Date)
+    note: Mapped[str | None] = mapped_column(String(300))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
 
 
 class DebtPayment(Base):
@@ -179,7 +197,21 @@ class DebtPayment(Base):
     client_id: Mapped[int] = mapped_column(ForeignKey("clients.id"), index=True)
     store_id: Mapped[int | None] = mapped_column(ForeignKey("stores.id"))
     amount: Mapped[Decimal] = mapped_column(Money)
-    method: Mapped[str] = mapped_column(String(20))  # cash, card
+    method: Mapped[str] = mapped_column(String(20))  # cash, card, return (системное погашение возвратом)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class SupplierPayment(Base):
+    """Наша оплата поставщику: гасит долг за заказы."""
+    __tablename__ = "supplier_payments"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("companies.id"), index=True)
+    supplier_id: Mapped[int] = mapped_column(ForeignKey("suppliers.id"), index=True)
+    document_id: Mapped[int | None] = mapped_column(ForeignKey("stock_documents.id"), index=True)
+    amount: Mapped[Decimal] = mapped_column(Money)
+    method: Mapped[str] = mapped_column(String(20))  # cash, card, transfer
+    note: Mapped[str | None] = mapped_column(String(300))
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
@@ -246,6 +278,8 @@ class Sale(Base):
     promo_code_id: Mapped[int | None] = mapped_column(ForeignKey("promo_codes.id"))
     bonus_earned: Mapped[Decimal] = mapped_column(Money, default=Decimal("0"))
     comment: Mapped[str | None] = mapped_column(Text)
+    exchange_of_id: Mapped[int | None] = mapped_column(ForeignKey("sales.id"))  # продажа, оформленная как обмен
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))  # кто пробил чек (продавец может быть другим)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
     items: Mapped[list["SaleItem"]] = relationship(cascade="all, delete-orphan", lazy="selectin")
     payments: Mapped[list["Payment"]] = relationship(cascade="all, delete-orphan", lazy="selectin")

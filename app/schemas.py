@@ -55,6 +55,7 @@ class CompanyOut(Out):
     low_stock_threshold: Num
     allow_negative_stock: bool
     utc_offset_minutes: int
+    debt_days_default: int | None = 30
 
 
 class CompanyPatch(BaseModel):
@@ -65,6 +66,7 @@ class CompanyPatch(BaseModel):
     low_stock_threshold: NonNeg | None = None
     allow_negative_stock: bool | None = None
     utc_offset_minutes: int | None = Field(default=None, ge=-720, le=840)
+    debt_days_default: int | None = Field(default=None, ge=0, le=3650)
 
 
 class StoreIn(BaseModel):
@@ -171,6 +173,7 @@ class ProductIn(BaseModel):
     is_active: bool = True
     cost_price: NonNeg = Decimal("0")
     retail_price: NonNeg = Decimal("0")
+    wholesale_price: NonNeg | None = None
 
 
 class ProductPatch(BaseModel):
@@ -183,6 +186,7 @@ class ProductPatch(BaseModel):
     is_service: bool | None = None
     is_active: bool | None = None
     cost_price: NonNeg | None = None
+    wholesale_price: NonNeg | None = None
 
 
 class ProductOut(Out):
@@ -197,6 +201,7 @@ class ProductOut(Out):
     is_active: bool
     cost_price: Num
     retail_price: Num
+    wholesale_price: Num | None = None
     stock: dict[int, Num] = {}  # store_id -> остаток
     stock_total: Num = Decimal("0")
 
@@ -211,7 +216,7 @@ class CatalogStats(BaseModel):
 
 # ---------- складские документы ----------
 
-DocKind = Literal["supplier_order", "inventory", "transfer", "writeoff", "repricing"]
+DocKind = Literal["supplier_order", "supplier_return", "inventory", "transfer", "writeoff", "repricing"]
 
 
 class DocItemIn(BaseModel):
@@ -249,6 +254,8 @@ class DocOut(Out):
     created_at: datetime
     completed_at: datetime | None
     items: list[DocItemOut]
+    total: Num = Decimal("0")  # сумма документа по закупочным ценам
+    paid: Num = Decimal("0")  # для заказа поставщику: сколько оплачено
 
 
 class MovementOut(Out):
@@ -289,6 +296,7 @@ class ClientIn(BaseModel):
     birth_date: date | None = None
     note: str | None = None
     sms_allowed: bool = True
+    gender: Literal["m", "f"] | None = None
 
 
 class ClientPatch(BaseModel):
@@ -299,6 +307,7 @@ class ClientPatch(BaseModel):
     birth_date: date | None = None
     note: str | None = None
     sms_allowed: bool | None = None
+    gender: Literal["m", "f"] | None = None
 
 
 class ClientOut(Out):
@@ -312,13 +321,25 @@ class ClientOut(Out):
     bonus_balance: Num
     debt_balance: Num
     sms_allowed: bool
+    gender: str | None = None
     created_at: datetime
+    purchases_total: Num = Decimal("0")
+    purchases_count: int = 0
+    last_purchase: datetime | None = None
+
+
+class ClientStats(BaseModel):
+    total: int
+    new_week: int
+    not_returning: int  # покупали раньше, но не приходили 60+ дней
+    birthdays: int  # день рождения в ближайшие 7 дней
 
 
 class DebtPaymentIn(BaseModel):
     amount: Pos
     method: Literal["cash", "card"]
     store_id: int | None = None
+    debt_ids: list[int] = []  # какие долги гасить в первую очередь
 
 
 class DebtPaymentOut(Out):
@@ -327,6 +348,58 @@ class DebtPaymentOut(Out):
     amount: Num
     method: str
     created_at: datetime
+    client_name: str | None = None
+
+
+class DebtOut(BaseModel):
+    id: int
+    client_id: int
+    client_name: str
+    client_phone: str | None
+    sale_id: int | None
+    sale_number: int | None
+    store_id: int | None
+    amount: Num
+    paid: Num
+    left: Num
+    due_date: date | None
+    status: str
+    note: str | None
+    created_at: datetime
+
+
+class DebtsPayIn(BaseModel):
+    debt_ids: list[int] = Field(min_length=1)
+    method: Literal["cash", "card"]
+
+
+class SupplierPaymentIn(BaseModel):
+    amount: Pos
+    method: Literal["cash", "card", "transfer"] = "cash"
+    document_id: int | None = None
+    note: str | None = None
+
+
+class SupplierPaymentOut(Out):
+    id: int
+    supplier_id: int
+    document_id: int | None
+    amount: Num
+    method: str
+    note: str | None
+    created_at: datetime
+
+
+class SupplierStatsOut(BaseModel):
+    id: int
+    name: str
+    phone: str | None
+    note: str | None
+    orders_total: Num
+    returns_total: Num
+    paid_total: Num
+    debt: Num
+    items_count: Num
 
 
 # ---------- маркетинг ----------
@@ -417,6 +490,22 @@ class SaleIn(BaseModel):
     bonus_to_use: NonNeg = Decimal("0")
     hold: bool = False  # True = отложить чек (без оплаты и списания со склада)
     comment: str | None = None
+    seller_id: int | None = None  # продавец (по умолчанию — кто пробивает)
+    wholesale: bool = False  # продавать по оптовым ценам
+    manual_discount_percent: Annotated[Decimal, Field(ge=0, le=100)] | None = None
+    manual_discount_amount: NonNeg | None = None
+    debt_due_date: date | None = None  # срок погашения, если часть в долг
+
+
+class ExchangeIn(BaseModel):
+    """Обмен: возвращаем часть старого чека, сумма идёт в зачёт новой покупки."""
+    return_items: list["ReturnItemIn"] = Field(min_length=1)
+    items: list[SaleItemIn] = Field(min_length=1)
+    payments: list[PaymentIn] = []  # доплата, если новая покупка дороже
+    refund_method: Literal["cash", "card"] = "cash"  # как вернуть разницу, если дешевле
+    promo_code: str | None = None
+    comment: str | None = None
+    seller_id: int | None = None
 
 
 class SaleQuoteOut(BaseModel):
@@ -431,6 +520,7 @@ class SaleQuoteOut(BaseModel):
 class CompleteHeldIn(BaseModel):
     payments: list[PaymentIn] = []
     bonus_to_use: NonNeg = Decimal("0")
+    debt_due_date: date | None = None
 
 
 class SaleItemOut(Out):
@@ -462,6 +552,8 @@ class SaleOut(Out):
     returned_total: Num
     bonus_earned: Num
     comment: str | None
+    exchange_of_id: int | None = None
+    created_by: int | None = None
     created_at: datetime
     items: list[SaleItemOut]
     payments: list[PaymentOut]
@@ -486,3 +578,12 @@ class ReturnOut(Out):
     items: list[dict]
     reason: str | None
     created_at: datetime
+
+
+class ExchangeOut(BaseModel):
+    sale: SaleOut
+    returned: Num
+    refund: Num  # сколько вернули клиенту деньгами (если новая покупка дешевле)
+
+
+ExchangeIn.model_rebuild()

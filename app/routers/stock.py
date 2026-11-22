@@ -8,10 +8,12 @@ from sqlalchemy.orm import Session
 
 from app.common import get_owned, get_store
 from app.db import get_db
-from app.models import Company, Product, StockDocument, StockDocumentItem, Supplier, User, now
+from sqlalchemy import func
+
+from app.models import Company, Product, StockDocument, StockDocumentItem, Supplier, SupplierPayment, User, now
 from app.schemas import DocIn, DocKind, DocOut
 from app.security import require
-from app.services.stock import change_stock, get_level
+from app.services.stock import change_stock, doc_total, get_level
 
 router = APIRouter(prefix="/api/stock", tags=["Склад"])
 
@@ -28,7 +30,7 @@ def _validate(db: Session, user: User, kind: str, data: DocIn):
         if not data.to_store_id or data.to_store_id == data.store_id:
             raise HTTPException(422, "Укажите другой магазин, куда перемещаете товар")
         get_store(db, data.to_store_id, user)
-    if kind == "supplier_order" and data.supplier_id:
+    if kind in ("supplier_order", "supplier_return") and data.supplier_id:
         get_owned(db, Supplier, data.supplier_id, user, "Поставщик")
     if kind == "writeoff" and not data.reason:
         raise HTTPException(422, "Укажите причину списания")
@@ -44,8 +46,25 @@ def _validate(db: Session, user: User, kind: str, data: DocIn):
                 raise HTTPException(422, f"Количество для «{p.name}» должно быть больше нуля")
 
 
+def _out(db, docs: list[StockDocument]) -> list[DocOut]:
+    """Добавляет сумму документа и, для заказов, сколько по ним оплачено."""
+    ids = [d.id for d in docs if d.kind == "supplier_order"]
+    paid = dict(db.execute(select(SupplierPayment.document_id, func.sum(SupplierPayment.amount))
+                           .where(SupplierPayment.document_id.in_(ids)).group_by(SupplierPayment.document_id)).all()) if ids else {}
+    out = []
+    for d in docs:
+        o = DocOut.model_validate(d)
+        if d.kind == "inventory":  # для инвентаризации сумма — разница по себестоимости
+            o.total = sum(((Decimal(i.qty) - Decimal(i.expected_qty or 0)) * Decimal(i.price or 0) for i in d.items), Decimal(0))
+        else:
+            o.total = doc_total(d)
+        o.paid = Decimal(paid.get(d.id) or 0)
+        out.append(o)
+    return out
+
+
 @router.get("/{kind}", response_model=list[DocOut])
-def list_docs(kind: DocKind, status: str | None = None, store_id: int | None = None,
+def list_docs(kind: DocKind, status: str | None = None, store_id: int | None = None, supplier_id: int | None = None,
               limit: int = Query(100, le=500), user: User = Depends(require("stock.manage")),
               db: Session = Depends(get_db)):
     q = select(StockDocument).where(StockDocument.company_id == user.company_id, StockDocument.kind == kind)
@@ -53,7 +72,9 @@ def list_docs(kind: DocKind, status: str | None = None, store_id: int | None = N
         q = q.where(StockDocument.status == status)
     if store_id:
         q = q.where((StockDocument.store_id == store_id) | (StockDocument.to_store_id == store_id))
-    return db.scalars(q.order_by(StockDocument.id.desc()).limit(limit)).all()
+    if supplier_id:
+        q = q.where(StockDocument.supplier_id == supplier_id)
+    return _out(db, db.scalars(q.order_by(StockDocument.id.desc()).limit(limit)).all())
 
 
 @router.post("/{kind}", response_model=DocOut, status_code=201)
@@ -65,7 +86,7 @@ def create_doc(kind: DocKind, data: DocIn, user: User = Depends(require("stock.m
         doc.items.append(StockDocumentItem(product_id=it.product_id, qty=it.qty, price=it.price))
     db.add(doc)
     db.commit()
-    return doc
+    return _out(db, [doc])[0]
 
 
 def _doc(db, user, kind, doc_id) -> StockDocument:
@@ -77,7 +98,7 @@ def _doc(db, user, kind, doc_id) -> StockDocument:
 
 @router.get("/{kind}/{doc_id}", response_model=DocOut)
 def get_doc(kind: DocKind, doc_id: int, user: User = Depends(require("stock.manage")), db: Session = Depends(get_db)):
-    return _doc(db, user, kind, doc_id)
+    return _out(db, [_doc(db, user, kind, doc_id)])[0]
 
 
 @router.post("/{kind}/{doc_id}/complete", response_model=DocOut)
@@ -97,9 +118,17 @@ def complete_doc(kind: DocKind, doc_id: int, user: User = Depends(require("stock
                          allow_negative=True, **common)
             if it.price is not None:
                 p.cost_price = it.price
+            else:
+                it.price = p.cost_price
+        elif kind == "supplier_return":
+            change_stock(db, product=p, store_id=doc.store_id, delta=-qty, reason="supplier_return",
+                         allow_negative=allow_neg, **common)
+            if it.price is None:
+                it.price = p.cost_price
         elif kind == "inventory":
             level = get_level(db, p.id, doc.store_id)
             it.expected_qty = level.qty
+            it.price = p.cost_price
             diff = qty - Decimal(level.qty)
             if diff:
                 change_stock(db, product=p, store_id=doc.store_id, delta=diff, reason="inventory",
@@ -109,15 +138,17 @@ def complete_doc(kind: DocKind, doc_id: int, user: User = Depends(require("stock
                          allow_negative=allow_neg, **common)
             change_stock(db, product=p, store_id=doc.to_store_id, delta=qty, reason="transfer_in",
                          allow_negative=True, **common)
+            it.price = p.cost_price
         elif kind == "writeoff":
             change_stock(db, product=p, store_id=doc.store_id, delta=-qty, reason="writeoff",
                          allow_negative=allow_neg, **common)
+            it.price = p.cost_price
         elif kind == "repricing":
             it.old_price = p.retail_price
             p.retail_price = it.price
     doc.status, doc.completed_at = "completed", now()
     db.commit()
-    return doc
+    return _out(db, [doc])[0]
 
 
 @router.post("/{kind}/{doc_id}/cancel", response_model=DocOut)
@@ -127,4 +158,4 @@ def cancel_doc(kind: DocKind, doc_id: int, user: User = Depends(require("stock.m
         raise HTTPException(409, "Отменить можно только черновик")
     doc.status = "cancelled"
     db.commit()
-    return doc
+    return _out(db, [doc])[0]

@@ -1,6 +1,6 @@
 """Логика кассы: расчёт скидок, проведение продажи, отложенные чеки, возвраты."""
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, timedelta
 from decimal import Decimal
 
 from fastapi import HTTPException
@@ -8,8 +8,8 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.common import get_owned, money
-from app.models import (Client, ClientGroup, Company, Payment, Product, PromoCode, Promotion, Sale, SaleItem,
-                        SaleReturn, now)
+from app.models import (Client, ClientDebt, ClientGroup, Company, DebtPayment, Payment, Product, PromoCode, Promotion,
+                        Sale, SaleItem, SaleReturn, User, now)
 from app.schemas import PaymentIn, ReturnIn, SaleItemIn
 from app.security import user_permissions
 from app.services.stock import change_stock
@@ -66,8 +66,20 @@ def find_promo_code(db: Session, company_id: int, code: str) -> PromoCode:
     return promo
 
 
+def _spread(lines: list[Line], amount: Decimal) -> None:
+    """Раскладывает скидку на весь чек по строкам пропорционально, чтобы возврат вернул точную сумму."""
+    base = sum((l.total for l in lines), ZERO)
+    left = amount
+    for i, l in enumerate(lines):
+        share = left if i == len(lines) - 1 else (money(amount * l.total / base) if base else ZERO)
+        share = min(share, l.total)
+        l.discount += share
+        left -= share
+
+
 def calculate(db: Session, user, store_id: int, client: Client | None, items: list[SaleItemIn],
-              promo_code: str | None) -> Calc:
+              promo_code: str | None, wholesale: bool = False, manual_percent: Decimal | None = None,
+              manual_amount: Decimal | None = None) -> Calc:
     can_override = "products.write" in user_permissions(user)
     group_pct = ZERO
     if client and client.group_id:
@@ -82,7 +94,8 @@ def calculate(db: Session, user, store_id: int, client: Client | None, items: li
             raise HTTPException(422, f"Товар «{product.name}» выключен и не продаётся")
         if it.price is not None and it.price != product.retail_price and not can_override:
             raise HTTPException(403, "Менять цену на кассе может только сотрудник с правом редактировать товары")
-        line = Line(product=product, qty=Decimal(it.qty), price=Decimal(it.price if it.price is not None else product.retail_price))
+        base_price = product.wholesale_price if wholesale and product.wholesale_price is not None else product.retail_price
+        line = Line(product=product, qty=Decimal(it.qty), price=Decimal(it.price if it.price is not None else base_price))
         best, best_name = group_pct, ("скидка группы клиента" if group_pct else None)
         for p in promos:
             applies = (not p.product_ids and not p.category_ids) or product.id in p.product_ids \
@@ -102,13 +115,13 @@ def calculate(db: Session, user, store_id: int, client: Client | None, items: li
             raise HTTPException(422, f"Промокод действует от суммы {promo.min_total}")
         code_disc = money(after_lines * Decimal(promo.discount_percent) / 100) if promo.discount_percent \
             else min(money(promo.discount_amount), after_lines)
-        # раскладываем скидку промокода по строкам, чтобы при возврате вернуть точную сумму
-        left = code_disc
-        for i, l in enumerate(lines):
-            share = left if i == len(lines) - 1 else money(code_disc * l.total / after_lines) if after_lines else ZERO
-            share = min(share, l.total)
-            l.discount += share
-            left -= share
+        _spread(lines, code_disc)
+    if manual_percent or manual_amount:
+        if "sales.discount" not in user_permissions(user):
+            raise HTTPException(403, "Ручную скидку может давать сотрудник с правом «Давать ручную скидку»")
+        base = sum((l.total for l in lines), ZERO)
+        md = money(base * Decimal(manual_percent) / 100) if manual_percent else min(money(manual_amount), base)
+        _spread(lines, md)
     discount = sum((l.discount for l in lines), ZERO)
     return Calc(lines=lines, subtotal=subtotal, discount=discount, total=subtotal - discount, promo=promo)
 
@@ -125,10 +138,20 @@ def next_number(db: Session, company_id: int) -> int:
     return company.receipt_counter
 
 
+def resolve_seller(db: Session, user, seller_id: int | None) -> int:
+    if not seller_id or seller_id == user.id:
+        return user.id
+    seller = db.get(User, seller_id)
+    if not seller or seller.company_id != user.company_id or not seller.is_active:
+        raise HTTPException(422, "Продавец не найден или отключён")
+    return seller.id
+
+
 def build_sale(db: Session, user, store_id: int, client: Client | None, calc: Calc, comment: str | None,
-               status: str) -> Sale:
+               status: str, seller_id: int | None = None) -> Sale:
     sale = Sale(company_id=user.company_id, number=next_number(db, user.company_id), store_id=store_id,
-                seller_id=user.id, client_id=client.id if client else None, status=status,
+                seller_id=resolve_seller(db, user, seller_id), created_by=user.id,
+                client_id=client.id if client else None, status=status,
                 subtotal=calc.subtotal, discount=calc.discount, total=calc.total,
                 promo_code_id=calc.promo.id if calc.promo else None, comment=comment)
     for l in calc.lines:
@@ -140,7 +163,8 @@ def build_sale(db: Session, user, store_id: int, client: Client | None, calc: Ca
     return sale
 
 
-def finalize(db: Session, user, sale: Sale, payments: list[PaymentIn], bonus_to_use: Decimal) -> Sale:
+def finalize(db: Session, user, sale: Sale, payments: list[PaymentIn], bonus_to_use: Decimal,
+             debt_due_date: date | None = None, exchange_credit: Decimal = ZERO) -> Sale:
     """Принимает оплату, списывает товар со склада, начисляет и списывает бонусы, пишет долг."""
     company = db.get(Company, user.company_id)
     client = db.get(Client, sale.client_id) if sale.client_id else None
@@ -156,6 +180,8 @@ def finalize(db: Session, user, sale: Sale, payments: list[PaymentIn], bonus_to_
     by_method: dict[str, Decimal] = {}
     for p in payments:
         by_method[p.method] = by_method.get(p.method, ZERO) + money(p.amount)
+    if exchange_credit > 0:
+        by_method["exchange"] = by_method.get("exchange", ZERO) + money(exchange_credit)
     paid = sum(by_method.values(), ZERO) + bonus
     if paid != total:
         raise HTTPException(422, f"Сумма оплат {paid} не равна сумме чека {total}")
@@ -179,7 +205,12 @@ def finalize(db: Session, user, sale: Sale, payments: list[PaymentIn], bonus_to_
         sale.payments.append(Payment(method="bonus", amount=bonus))
         client.bonus_balance = Decimal(client.bonus_balance) - bonus
     if client:
-        client.debt_balance = Decimal(client.debt_balance) + by_method.get("debt", ZERO)
+        debt = by_method.get("debt", ZERO)
+        client.debt_balance = Decimal(client.debt_balance) + debt
+        if debt > 0:
+            days = company.debt_days_default or 30
+            db.add(ClientDebt(company_id=user.company_id, client_id=client.id, sale_id=sale.id, store_id=sale.store_id,
+                              amount=debt, due_date=debt_due_date or (now().date() + timedelta(days=days))))
         real_money = by_method.get("cash", ZERO) + by_method.get("card", ZERO)
         sale.bonus_earned = money(real_money * Decimal(company.loyalty_percent) / 100)
         client.bonus_balance = Decimal(client.bonus_balance) + sale.bonus_earned
@@ -210,15 +241,54 @@ def make_return(db: Session, user, sale: Sale, data: ReturnIn) -> SaleReturn:
         amount += part
         rows.append({"sale_item_id": item.id, "qty": float(r.qty), "amount": float(part)})
 
+    refund_method = data.refund_method
     if data.refund_method == "debt":
-        if not client or Decimal(client.debt_balance) < amount:
-            raise HTTPException(422, "Списать с долга нельзя: у клиента нет такого долга")
-        client.debt_balance = Decimal(client.debt_balance) - amount
+        if not client or Decimal(client.debt_balance) <= 0:
+            raise HTTPException(422, "Списать с долга нельзя: у клиента нет долга")
+        to_debt = min(amount, Decimal(client.debt_balance))
+        client.debt_balance = Decimal(client.debt_balance) - to_debt
+        # системное погашение: сначала долг этой продажи, потом остальные по сроку
+        allocate_debt_payment(db, client, to_debt, prefer_sale_id=sale.id)
+        db.add(DebtPayment(company_id=user.company_id, client_id=client.id, store_id=sale.store_id, amount=to_debt,
+                           method="return", user_id=user.id))
+        if to_debt < amount:
+            refund_method = "debt+cash"  # остаток сверх долга отдаём наличными
     if client and sale.bonus_earned and sale.total:
         back = money(Decimal(sale.bonus_earned) * amount / Decimal(sale.total))
         client.bonus_balance = max(ZERO, Decimal(client.bonus_balance) - back)
     sale.returned_total = Decimal(sale.returned_total) + amount
     ret = SaleReturn(company_id=user.company_id, sale_id=sale.id, store_id=sale.store_id, user_id=user.id,
-                     amount=amount, refund_method=data.refund_method, items=rows, reason=data.reason)
+                     amount=amount, refund_method=refund_method, items=rows, reason=data.reason)
     db.add(ret)
     return ret
+
+
+def open_debts(db: Session, client_id: int) -> list[ClientDebt]:
+    db.flush()
+    rows = db.scalars(select(ClientDebt).where(ClientDebt.client_id == client_id).order_by(ClientDebt.due_date, ClientDebt.id)).all()
+    return [d for d in rows if Decimal(d.paid) < Decimal(d.amount)]
+
+
+def allocate_debt_payment(db: Session, client: Client, amount: Decimal, prefer_sale_id: int | None = None,
+                          debt_ids: list[int] | None = None) -> None:
+    """Раскладывает оплату по открытым долгам клиента: сначала указанные, потом самые старые по сроку."""
+    debts = open_debts(db, client.id)
+    if debt_ids:
+        debts.sort(key=lambda d: d.id not in debt_ids)
+    if prefer_sale_id:
+        debts.sort(key=lambda d: d.sale_id != prefer_sale_id)
+    left = money(amount)
+    for d in debts:
+        if left <= 0:
+            break
+        take = min(left, Decimal(d.amount) - Decimal(d.paid))
+        d.paid = Decimal(d.paid) + take
+        left -= take
+
+
+def debt_status(d: ClientDebt, today: date) -> str:
+    if Decimal(d.paid) >= Decimal(d.amount):
+        return "paid"
+    if d.due_date and d.due_date < today:
+        return "overdue"
+    return "partial" if Decimal(d.paid) > 0 else "unpaid"

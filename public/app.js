@@ -23,8 +23,8 @@ const fDateTime = s => utc(s).toLocaleString('ru-RU', { day: '2-digit', month: '
 const fDay = s => new Date(s + 'T00:00').toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
 const WD = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
 const MONTHS = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
-const PAY = { cash: 'Наличные', card: 'Карта', debt: 'В долг', bonus: 'Бонусы' };
-const PAY_TAG = { cash: 'green', card: '', debt: 'red', bonus: 'amber' };
+const PAY = { cash: 'Наличные', card: 'Карта', debt: 'В долг', bonus: 'Бонусы', exchange: 'Обмен' };
+const PAY_TAG = { cash: 'green', card: '', debt: 'red', bonus: 'amber', exchange: 'grey' };
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const can = p => !!S.me?.permissions?.includes(p);
 const opts = (list, sel, val = 'id', label = 'name', empty) =>
@@ -121,6 +121,8 @@ const ICONS = {
   sales: I('<path d="M6 3h12v18l-3-2-3 2-3-2-3 2zM9 8h6M9 12h6"/>'),
   products: I('<path d="M3 7l9-4 9 4-9 4zM3 7v10l9 4 9-4V7M12 11v10"/>'),
   clients: I('<circle cx="9" cy="8" r="4"/><path d="M2 21c0-4 3-6 7-6s7 2 7 6M17 11a3 3 0 1 0 0-6M22 21c0-3-2-5-5-5"/>'),
+  suppliers: I('<path d="M1 7h13v10H1zM14 10h4l3 3v4h-7"/><circle cx="5" cy="18" r="2"/><circle cx="17" cy="18" r="2"/>'),
+  debts: I('<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18M7 15h4"/>'),
   marketing: I('<path d="M3 11v2l13 5V6zM16 8a4 4 0 0 1 0 8M6 14l1 5h3l-1-4"/>'),
   reports: I('<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>'),
   staff: I('<circle cx="12" cy="7" r="4"/><path d="M4 21c0-4 4-7 8-7s8 3 8 7"/>'),
@@ -134,7 +136,9 @@ const ROUTES = {
   kassa: { t: 'Касса', perm: 'sales.create', render: viewKassa },
   sales: { t: 'Продажи', perm: 'sales.read', render: viewSales },
   products: { t: 'Товары', perm: 'products.read', render: viewProducts },
+  suppliers: { t: 'Поставщики', perm: 'stock.manage', render: viewSuppliers },
   clients: { t: 'Клиенты', perm: 'clients.read', render: viewClients },
+  debts: { t: 'Долги', perm: 'clients.read', render: viewDebts },
   marketing: { t: 'Маркетинг', perm: 'marketing.manage', render: viewMarketing },
   reports: { t: 'Отчёты', perm: 'reports.read', render: viewReports },
   staff: { t: 'Сотрудники', perm: 'staff.manage', render: viewStaff },
@@ -344,16 +348,21 @@ function targetModal() {
 }
 
 // ================= КАССА =================
-const K = { cat: '', q: '', products: [], cart: [], client: null, pay: 'cash', received: '', promo: '', bonus: '', quote: null, qErr: '', done: null };
+const K = { cat: '', q: '', products: [], cart: [], client: null, pay: 'cash', split: { cash: '', card: '', debt: '' }, received: '', promo: '', bonus: '',
+  quote: null, qErr: '', done: null, lastSale: null, seller: null, sellers: [], wholesale: false, disc: '', discType: '%', note: '', noteOpen: false,
+  due: '', exchange: null };
 async function viewKassa(v) {
   if (!S.storeId) { v.innerHTML = '<div class="panel empty">Нет доступного магазина. Владелец может добавить магазин в настройках.</div>'; return; }
-  const [prods] = await Promise.all([api('/api/products' + qs({ status: 'active', size: 500, store_id: S.storeId }))]);
-  K.products = prods.items;
+  const [prods, sellers] = await Promise.all([api('/api/products' + qs({ status: 'active', size: 500, store_id: S.storeId })), api('/api/sales/sellers')]);
+  K.products = prods.items; K.sellers = sellers;
+  if (!K.seller || !sellers.some(s => s.id === K.seller)) K.seller = S.me.id;
   drawKassa(v);
   bindKassa(v);
   requote();
 }
 const stockOf = p => +(p.stock?.[S.storeId] || 0);
+const hasWholesale = () => K.products.some(p => p.wholesale_price != null);
+const priceOf = p => (K.wholesale && p.wholesale_price != null ? p.wholesale_price : p.retail_price);
 function kassaTiles() {
   const q = K.q.trim().toLowerCase();
   const list = K.products.filter(p => (!K.cat || String(p.category_id) === K.cat) &&
@@ -366,67 +375,108 @@ function kassaTiles() {
     return `<button class="tile" type="button" data-add="${p.id}" ${out ? 'disabled' : ''}>
       <span class="pic" style="background:${bg};color:${fg}" aria-hidden="true">${esc(initials(p.name))}</span>
       <span class="nm">${esc(p.name)}</span>
-      <span class="pr"><b class="num">${money(p.retail_price)}</b><small class="${p.is_service ? 'muted' : st <= 0 ? 'bad' : st <= +S.company.low_stock_threshold ? 'warn' : 'muted'}">${p.is_service ? 'услуга' : st <= 0 ? 'нет в наличии' : `${num(st)} ${esc(p.unit)}`}</small></span></button>`;
+      <span class="pr"><b class="num">${money(priceOf(p))}</b><small class="${p.is_service ? 'muted' : st <= 0 ? 'bad' : st <= +S.company.low_stock_threshold ? 'warn' : 'muted'}">${p.is_service ? 'услуга' : st <= 0 ? 'нет в наличии' : `${num(st)} ${esc(p.unit)}`}</small></span></button>`;
   }).join('')}</div>`;
 }
-function kassaCheck() {
-  const q = K.quote, total = q?.total ?? 0, c = K.client;
-  const bonusMax = q?.bonus_max_for_this_sale ?? 0, bonus = Math.min(+K.bonus || 0, bonusMax);
-  const toPay = Math.max(0, +(total - bonus).toFixed(2));
+// сколько платить и сколько уже распределено по способам
+function payState() {
+  const q = K.quote, total = q?.total ?? 0;
+  const credit = K.exchange ? K.exchange.credit : 0;
+  const bonusMax = q?.bonus_max_for_this_sale ?? 0, bonus = K.exchange ? 0 : Math.min(+K.bonus || 0, bonusMax);
+  const toPay = Math.max(0, +(total - bonus - credit).toFixed(2));
+  const refund = K.exchange ? Math.max(0, +(credit - total).toFixed(2)) : 0;
+  let payments = [];
+  if (toPay > 0) {
+    if (K.pay === 'split') payments = ['cash', 'card', 'debt'].map(m => ({ method: m, amount: +(+K.split[m] || 0).toFixed(2) })).filter(p => p.amount > 0);
+    else payments = [{ method: K.pay, amount: toPay }];
+  }
+  const given = +payments.reduce((a, p) => a + p.amount, 0).toFixed(2);
+  const usesDebt = payments.some(p => p.method === 'debt');
+  const cash = K.pay === 'cash' ? toPay : (+K.split.cash || 0);
   const change = K.pay === 'cash' && +K.received > toPay ? +K.received - toPay : 0;
+  return { total, bonus, bonusMax, toPay, refund, payments, given, usesDebt, change, cash };
+}
+function kassaCheck() {
+  const q = K.quote, c = K.exchange ? K.exchange.client : K.client, ps = payState();
   const lines = K.cart.map((l, i) => {
     const qi = q?.items?.[i];
-    return `<div class="cart-line"><div class="t"><span>${esc(l.p.name)}</span><b class="num">${money(qi ? qi.total : l.p.retail_price * l.qty)}</b></div>
+    return `<div class="cart-line"><div class="t"><span>${esc(l.p.name)}</span><b class="num">${money(qi ? qi.total : priceOf(l.p) * l.qty)}</b></div>
       ${qi?.discount ? `<div class="t note"><span>${esc(qi.promotion || 'Скидка')}</span><span>−${num(qi.discount)}</span></div>` : ''}
       <div class="qty"><button type="button" data-dec="${i}" aria-label="Меньше">−</button><input class="num" data-qty="${i}" value="${num(l.qty).replace(/\s/g, '')}" inputmode="decimal" aria-label="Количество">
-      <button type="button" data-inc="${i}" aria-label="Больше">+</button><span style="margin-left:auto">× ${num(l.p.retail_price)}</span></div></div>`;
+      <button type="button" data-inc="${i}" aria-label="Больше">+</button><span style="margin-left:auto">× ${num(qi ? qi.price : priceOf(l.p))}</span></div></div>`;
   }).join('');
+  const sellerSel = K.sellers.length > 1 ? `<label class="field"><span>Продавец</span><select class="input" id="kSeller">${opts(K.sellers, K.seller)}</select></label>` : '';
+  const discBlock = can('sales.discount') && !K.exchange ? `<div class="field"><span>Ручная скидка <small class="muted">(K)</small></span>
+      <div style="display:flex;gap:8px;align-items:center"><input class="input" id="kDisc" type="number" min="0" step="0.01" value="${esc(K.disc)}" placeholder="0" style="min-height:40px">
+      <div class="seg" role="group" aria-label="Тип скидки"><button type="button" data-dt="%" class="${K.discType === '%' ? 'on' : ''}">%</button><button type="button" data-dt="sum" class="${K.discType === 'sum' ? 'on' : ''}">${esc(S.company.currency || 'сумма')}</button></div></div>
+      <div class="chips">${[15, 30, 50, 75].map(x => `<button type="button" class="chip" style="min-height:32px;padding:0 12px" data-quick="${x}">${x}%</button>`).join('')}</div></div>` : '';
+  const payBlock = ps.toPay > 0 ? `
+    <div class="pays" role="group" aria-label="Способ оплаты" style="grid-template-columns:repeat(2,minmax(0,1fr))">${[['cash', 'Наличные'], ['card', 'Карта'], ['debt', 'В долг'], ['split', 'Частями']].map(([m, t]) => `<button type="button" data-pay="${m}" class="${K.pay === m ? 'on' : ''}" aria-pressed="${K.pay === m}">${t}</button>`).join('')}</div>
+    ${K.pay === 'cash' ? `<label class="field"><span>Получено от клиента</span><input class="input" id="recv" type="number" min="0" step="0.01" value="${esc(K.received)}" placeholder="${num(ps.toPay)}"></label>${ps.change ? `<div class="ok-msg">Сдача: ${money(ps.change)}</div>` : ''}` : ''}
+    ${K.pay === 'split' ? `<div class="two" style="display:grid;grid-template-columns:repeat(${c ? 3 : 2},minmax(0,1fr));gap:8px">
+      ${['cash', 'card'].concat(c ? ['debt'] : []).map(m => `<label class="field"><span>${PAY[m]}</span><input class="input" data-split="${m}" type="number" min="0" step="0.01" value="${esc(K.split[m])}"></label>`).join('')}</div>
+      <div class="note ${ps.given === ps.toPay ? 'good' : 'bad'}">${ps.given === ps.toPay ? 'Сумма сходится' : ps.given < ps.toPay ? `Осталось распределить ${money(ps.toPay - ps.given)}` : `Больше суммы на ${money(ps.given - ps.toPay)}`}</div>` : ''}
+    ${ps.usesDebt && !c ? '<span class="bad note">Для продажи в долг выберите клиента.</span>' : ''}
+    ${ps.usesDebt && c ? `<label class="field"><span>Вернуть долг до</span><input class="input" id="kDue" type="date" value="${esc(K.due || iso(addDays(new Date(), S.company.debt_days_default || 30)))}"></label>` : ''}` : '';
+  const blocked = !!K.qErr || (ps.usesDebt && !c) || (ps.toPay > 0 && ps.given !== ps.toPay);
   return `<div class="tape" style="display:grid;gap:14px">
-    <div class="head" style="align-items:center"><h2>Новый чек</h2>${K.cart.length ? '<button class="btn link sm danger" style="border:0" type="button" data-clear>Очистить</button>' : ''}</div>
-    ${c ? `<div class="client-box"><span class="avatar">${esc(initials(c.name))}</span><span style="flex:1;line-height:1.3"><b>${esc(c.name)}</b><br><small class="muted">${esc(c.phone || '')}${+c.bonus_balance ? ` · бонусы ${num(c.bonus_balance)}` : ''}${+c.debt_balance ? ` · <span class="bad">долг ${num(c.debt_balance)}</span>` : ''}</small></span><button class="btn link sm" type="button" data-unclient>Убрать</button></div>`
-      : `<div class="dd"><div class="search" style="min-height:46px;border-style:dashed"><span aria-hidden="true">👤</span><input id="cSearch" placeholder="Клиент: имя или телефон" autocomplete="off" aria-label="Найти клиента"></div><div class="dd-list" id="cList" hidden></div></div>`}
-    <div>${K.cart.length ? lines : '<p class="empty mono" style="padding:16px 0">Чек пустой. Отсканируйте штрихкод или выберите товар слева.</p>'}</div>
+    <div class="head" style="align-items:center"><h2>${K.exchange ? `Обмен по чеку №${K.exchange.sale.number}` : 'Новый чек'}</h2>${K.cart.length || K.exchange ? `<button class="btn link sm" style="color:var(--red-t)" type="button" data-clear>${K.exchange ? 'Отменить обмен' : 'Очистить'}</button>` : ''}</div>
+    ${K.exchange ? `<div class="ok-msg" style="background:var(--blue-soft);color:var(--blue)">Возвращается: ${esc(K.exchange.items.map(i => `${i.name} × ${num(i.qty)}`).join(', '))}. В зачёт: ${money(K.exchange.credit)}. Выберите новые товары.</div>` : ''}
+    ${K.exchange ? (c ? `<div class="client-box"><span class="avatar">${esc(initials(c.name))}</span><b style="flex:1">${esc(c.name)}</b></div>` : '')
+      : c ? `<div class="client-box"><span class="avatar">${esc(initials(c.name))}</span><span style="flex:1;line-height:1.3"><b>${esc(c.name)}</b><br><small class="muted">${esc(c.phone || '')}${+c.bonus_balance ? ` · бонусы ${num(c.bonus_balance)}` : ''}${+c.debt_balance ? ` · <span class="bad">долг ${num(c.debt_balance)}</span>` : ''}</small></span><button class="btn link sm" type="button" data-unclient>Убрать</button></div>`
+      : `<div class="dd"><div class="search" style="min-height:46px;border-style:dashed"><span aria-hidden="true">👤</span><input id="cSearch" placeholder="Клиент: имя или телефон (J)" autocomplete="off" aria-label="Найти клиента"></div><div class="dd-list" id="cList" hidden></div></div>`}
+    ${sellerSel}
+    ${hasWholesale() && !K.exchange ? `<label class="check"><input type="checkbox" id="kWholesale" ${K.wholesale ? 'checked' : ''}> Оптовые цены</label>` : ''}
+    <div>${K.cart.length ? lines : '<p class="empty mono" style="padding:16px 0">Чек пустой. Отсканируйте штрихкод или выберите товар слева. Клавиша «/» — поиск.</p>'}</div>
     ${K.cart.length ? `
     <div class="mono note" style="display:grid;gap:3px">
       <div style="display:flex;justify-content:space-between"><span>Без скидок</span><span>${num(q?.subtotal)}</span></div>
-      <div style="display:flex;justify-content:space-between"><span>Скидка</span><span>${q?.discount ? '−' + num(q.discount) : '0'}</span></div></div>
-    <div style="display:flex;gap:8px"><input class="input" id="promo" placeholder="Промокод" value="${esc(K.promo)}" style="min-height:40px;text-transform:uppercase" aria-label="Промокод"><button class="btn ghost sm" type="button" data-promo>Применить</button></div>
+      <div style="display:flex;justify-content:space-between"><span>Скидка</span><span>${q?.discount ? '−' + num(q.discount) : '0'}</span></div>
+      ${K.exchange ? `<div style="display:flex;justify-content:space-between"><span>Зачёт по обмену</span><span>−${num(Math.min(K.exchange.credit, ps.total))}</span></div>` : ''}</div>
+    ${discBlock}
+    ${K.exchange ? '' : `<div style="display:flex;gap:8px"><input class="input" id="promo" placeholder="Промокод" value="${esc(K.promo)}" style="min-height:40px;text-transform:uppercase" aria-label="Промокод"><button class="btn ghost sm" type="button" data-promo>Применить</button></div>`}
     ${K.qErr ? `<div class="err">${esc(K.qErr)}</div>` : ''}
-    ${c && bonusMax > 0 ? `<label class="field"><span>Оплатить бонусами (до ${num(bonusMax)})</span><input class="input" id="bonus" type="number" min="0" step="0.01" max="${bonusMax}" value="${esc(K.bonus)}"></label>` : ''}
-    <div class="total"><span style="font-weight:600">К оплате</span><b class="num">${num(toPay)}</b></div>
-    <div class="pays" role="group" aria-label="Способ оплаты">${['cash', 'card', 'debt'].map(m => `<button type="button" data-pay="${m}" class="${K.pay === m ? 'on' : ''}" aria-pressed="${K.pay === m}">${PAY[m]}</button>`).join('')}</div>
-    ${K.pay === 'cash' ? `<label class="field"><span>Получено от клиента</span><input class="input" id="recv" type="number" min="0" step="0.01" value="${esc(K.received)}" placeholder="${num(toPay)}"></label>${change ? `<div class="ok-msg">Сдача: ${money(change)}</div>` : ''}` : ''}
-    ${K.pay === 'debt' && !c ? '<span class="bad note">Для продажи в долг выберите клиента.</span>' : ''}
-    <button class="btn big" type="button" data-sell ${K.qErr || (K.pay === 'debt' && !c) ? 'disabled' : ''}>Принять оплату</button>
-    <button class="btn link" type="button" data-hold>Отложить чек</button>` : ''}
-    ${K.done ? `<div class="ok-msg" role="status">${esc(K.done)}</div>` : ''}
+    ${!K.exchange && c && ps.bonusMax > 0 ? `<label class="field"><span>Оплатить бонусами (до ${num(ps.bonusMax)})</span><input class="input" id="bonus" type="number" min="0" step="0.01" max="${ps.bonusMax}" value="${esc(K.bonus)}"></label>` : ''}
+    ${K.noteOpen || K.note ? `<label class="field"><span>Заметка к чеку</span><textarea class="input" id="kNote" style="min-height:60px">${esc(K.note)}</textarea></label>` : '<button class="btn link sm" type="button" data-noteopen style="justify-self:start">+ Добавить заметку</button>'}
+    <div class="total"><span style="font-weight:600">${ps.refund ? 'Вернуть клиенту' : 'К оплате'}</span><b class="num">${num(ps.refund || ps.toPay)}</b></div>
+    ${payBlock}
+    ${ps.refund ? `<div class="pays" style="grid-template-columns:repeat(2,minmax(0,1fr))">${['cash', 'card'].map(m => `<button type="button" data-refund="${m}" class="${(K.refundMethod || 'cash') === m ? 'on' : ''}">${m === 'cash' ? 'Вернуть наличными' : 'Вернуть на карту'}</button>`).join('')}</div>` : ''}
+    <button class="btn big" type="button" data-sell ${blocked ? 'disabled' : ''}>${K.exchange ? 'Провести обмен' : 'Принять оплату'} <small style="opacity:.7">(L)</small></button>
+    ${K.exchange ? '' : '<button class="btn link" type="button" data-hold>Отложить чек (O)</button>'}` : ''}
+    ${K.done ? `<div class="ok-msg" role="status">${esc(K.done)}</div>${K.lastSale ? '<button class="btn ghost" type="button" data-print>Печать чека</button>' : ''}` : ''}
   </div>`;
 }
 function drawKassa(v) {
-  v.innerHTML = `<div class="head"><div><h1>Касса</h1><p class="sub">${esc(S.stores.find(s => s.id === S.storeId)?.name || '')}, продавец ${esc(S.me.name)}</p></div>
-    <div style="display:flex;gap:10px;flex-wrap:wrap"><button class="btn ghost" type="button" data-held>Отложенные чеки</button>${can('sales.return') ? '<a class="btn ghost" href="#sales">Возврат</a>' : ''}</div></div>
+  v.innerHTML = `<div class="head"><div><h1>Касса</h1><p class="sub">${esc(S.stores.find(s => s.id === S.storeId)?.name || '')} · клавиши: / поиск, J клиент, K скидка, L оплатить, O отложить</p></div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap"><button class="btn ghost" type="button" data-held>Отложенные чеки</button>${can('sales.return') ? '<button class="btn ghost" type="button" data-returns>Возврат и обмен</button>' : ''}</div></div>
   <div class="row"><section class="grow grid" aria-label="Товары">
     <label class="search"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#5A6280" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
       <input id="kq" placeholder="Название, артикул или отсканируйте штрихкод" value="${esc(K.q)}" autocomplete="off" aria-label="Поиск товара"></label>
     <div class="chips" role="group" aria-label="Категории"><button type="button" class="chip ${!K.cat ? 'on' : ''}" data-cat="">Все</button>${S.cats.map(c => `<button type="button" class="chip ${K.cat === String(c.id) ? 'on' : ''}" data-cat="${c.id}">${esc(c.name)}</button>`).join('')}</div>
     <div id="tiles">${kassaTiles()}</div></section>
     <aside class="aside" id="check" aria-label="Чек">${kassaCheck()}</aside></div>`;
+  cartBar();
 }
 function cartBar() {
   $('.cartbar')?.remove(); $('#view')?.classList.remove('has-cartbar');
   if (!K.cart.length || !$('#check')) return;
-  const n = K.cart.reduce((a, l) => a + l.qty, 0), total = K.quote?.total ?? K.cart.reduce((a, l) => a + l.qty * l.p.retail_price, 0);
+  const n = K.cart.reduce((a, l) => a + l.qty, 0), total = K.quote?.total ?? K.cart.reduce((a, l) => a + l.qty * priceOf(l.p), 0);
   const bar = document.createElement('div'); bar.className = 'cartbar';
   bar.innerHTML = `<span>${num(n)} ${plural(Math.round(n), 'товар', 'товара', 'товаров')} · <b class="num">${money(total)}</b></span><button class="btn sm" type="button">К чеку</button>`;
   bar.querySelector('button').onclick = () => $('#check').scrollIntoView({ behavior: 'smooth' });
   $('#view').append(bar); $('#view').classList.add('has-cartbar');
 }
-const redrawCheck = () => { cartBar(); const el = $('#check'); if (el) { const f = document.activeElement?.id; el.innerHTML = kassaCheck(); if (f && $('#' + f)) { const x = $('#' + f); x.focus(); const n = x.value.length; try { x.setSelectionRange(n, n); } catch { /* number input */ } } } };
+const redrawCheck = () => { cartBar(); const el = $('#check'); if (el) { const f = document.activeElement; const id = f?.id, sp = f?.dataset?.split; el.innerHTML = kassaCheck(); const x = id ? $('#' + id) : sp ? $(`[data-split="${sp}"]`) : null; if (x) { x.focus(); try { const n = x.value.length; x.setSelectionRange(n, n); } catch { /* number */ } } } };
+const discBody = () => {
+  const d = +K.disc || 0; if (!d) return {};
+  return K.discType === '%' ? { manual_discount_percent: Math.min(100, d) } : { manual_discount_amount: d };
+};
 const requote = debounce(async () => {
-  K.done = null;
   if (!K.cart.length) { K.quote = null; K.qErr = ''; redrawCheck(); return; }
+  const client = K.exchange ? K.exchange.client : K.client;
   try {
-    K.quote = await api('/api/sales/quote', { method: 'POST', body: { store_id: S.storeId, client_id: K.client?.id, promo_code: K.promo || null, items: K.cart.map(l => ({ product_id: l.p.id, qty: l.qty })) } });
+    K.quote = await api('/api/sales/quote', { method: 'POST', body: { store_id: S.storeId, client_id: client?.id, promo_code: K.exchange ? null : (K.promo || null),
+      wholesale: K.exchange ? false : K.wholesale, ...(K.exchange ? {} : discBody()), items: K.cart.map(l => ({ product_id: l.p.id, qty: l.qty })) } });
     K.qErr = '';
   } catch (e) { K.qErr = e.message; }
   redrawCheck();
@@ -434,7 +484,11 @@ const requote = debounce(async () => {
 function addToCart(p) {
   const l = K.cart.find(x => x.p.id === p.id);
   if (l) l.qty += 1; else K.cart.push({ p, qty: 1 });
-  K.done = null; redrawCheck(); requote();
+  K.done = null; K.lastSale = null; redrawCheck(); requote();
+}
+function resetCheck() {
+  Object.assign(K, { cart: [], client: null, promo: '', bonus: '', received: '', quote: null, qErr: '', pay: 'cash', split: { cash: '', card: '', debt: '' },
+    disc: '', note: '', noteOpen: false, due: '', exchange: null, wholesale: false, refundMethod: 'cash' });
 }
 function bindKassa(v) {
   const searchClients = debounce(async q => {
@@ -445,6 +499,7 @@ function bindKassa(v) {
       (can('clients.write') ? `<button type="button" data-newclient="${esc(q)}">+ Новый клиент «${esc(q)}»</button>` : '');
     box.hidden = false;
   }, 250);
+  const reDisc = debounce(() => requote(), 300);
   v.oninput = e => {
     const t = e.target;
     if (t.id === 'kq') { K.q = t.value; $('#tiles').innerHTML = kassaTiles(); }
@@ -452,10 +507,16 @@ function bindKassa(v) {
     if (t.id === 'recv') { K.received = t.value; redrawCheck(); }
     if (t.id === 'bonus') { K.bonus = t.value; redrawCheck(); }
     if (t.id === 'promo') K.promo = t.value.trim().toUpperCase();
+    if (t.id === 'kDisc') { K.disc = t.value; reDisc(); }
+    if (t.id === 'kNote') K.note = t.value;
+    if (t.dataset.split) { K.split[t.dataset.split] = t.value; redrawCheck(); }
   };
   v.onchange = e => {
-    const i = e.target.dataset.qty;
-    if (i != null) { const q = nOrNull(e.target.value); if (q > 0) K.cart[i].qty = q; else K.cart.splice(i, 1); redrawCheck(); requote(); }
+    const t = e.target, i = t.dataset.qty;
+    if (i != null) { const q = nOrNull(t.value); if (q > 0) K.cart[i].qty = q; else K.cart.splice(i, 1); redrawCheck(); requote(); }
+    if (t.id === 'kSeller') K.seller = +t.value;
+    if (t.id === 'kWholesale') { K.wholesale = t.checked; $('#tiles').innerHTML = kassaTiles(); requote(); }
+    if (t.id === 'kDue') K.due = t.value;
   };
   v.onkeydown = async e => {
     if (e.target.id === 'kq' && e.key === 'Enter') {
@@ -472,34 +533,61 @@ function bindKassa(v) {
     const t = e.target.closest('button,a'); if (!t) return;
     const d = t.dataset;
     if (d.add) addToCart(K.products.find(p => p.id === +d.add));
-    else if (d.cat != null) { K.cat = d.cat; $$('.chip', v).forEach(c => c.classList.toggle('on', c.dataset.cat === d.cat)); $('#tiles').innerHTML = kassaTiles(); }
+    else if (d.cat != null) { K.cat = d.cat; $$('.chip[data-cat]', v).forEach(c => c.classList.toggle('on', c.dataset.cat === d.cat)); $('#tiles').innerHTML = kassaTiles(); }
     else if (d.inc) { K.cart[d.inc].qty += 1; redrawCheck(); requote(); }
     else if (d.dec) { const l = K.cart[d.dec]; l.qty -= 1; if (l.qty <= 0) K.cart.splice(d.dec, 1); redrawCheck(); requote(); }
-    else if ('clear' in d) { Object.assign(K, { cart: [], client: null, promo: '', bonus: '', received: '', quote: null, qErr: '' }); redrawCheck(); }
+    else if ('clear' in d) { resetCheck(); K.done = null; redrawCheck(); }
     else if (d.pay) { K.pay = d.pay; redrawCheck(); }
+    else if (d.refund) { K.refundMethod = d.refund; redrawCheck(); }
+    else if (d.dt) { K.discType = d.dt; redrawCheck(); requote(); }
+    else if (d.quick) { K.discType = '%'; K.disc = d.quick; redrawCheck(); requote(); }
+    else if ('noteopen' in d) { K.noteOpen = true; redrawCheck(); $('#kNote')?.focus(); }
     else if ('promo' in d) requote();
     else if (d.client) { K.client = JSON.parse(d.client); K.bonus = ''; redrawCheck(); requote(); }
-    else if ('unclient' in d) { K.client = null; K.bonus = ''; if (K.pay === 'debt') K.pay = 'cash'; redrawCheck(); requote(); }
+    else if ('unclient' in d) { K.client = null; K.bonus = ''; if (K.pay === 'debt') K.pay = 'cash'; K.split.debt = ''; redrawCheck(); requote(); }
     else if (d.newclient != null) clientModal(null, c => { K.client = c; redrawCheck(); requote(); }, { name: d.newclient });
     else if ('sell' in d) sell(false);
     else if ('hold' in d) sell(true);
     else if ('held' in d) heldModal();
+    else if ('returns' in d) returnsModal();
+    else if ('print' in d && K.lastSale) printReceipt(K.lastSale);
   };
 }
+// горячие клавиши кассы (как в BILLZ)
+document.addEventListener('keydown', e => {
+  if (location.hash !== '#kassa' || !$('#check') || $('.modal-bg')) return;
+  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName);
+  if (e.key === 'Escape' && typing) { document.activeElement.blur(); return; }
+  if (typing || e.ctrlKey || e.metaKey || e.altKey) return;
+  const k = e.key.toLowerCase();
+  const map = { '/': () => $('#kq')?.focus(), j: () => $('#cSearch')?.focus(), о: () => $('#cSearch')?.focus(), k: () => $('#kDisc')?.focus(), л: () => $('#kDisc')?.focus(),
+    l: () => $('[data-sell]:not(:disabled)')?.click(), д: () => $('[data-sell]:not(:disabled)')?.click(), o: () => $('[data-hold]')?.click(), щ: () => $('[data-hold]')?.click() };
+  if (map[k]) { e.preventDefault(); map[k](); }
+});
 async function sell(hold) {
   const q = K.quote; if (!q || !K.cart.length) return;
-  const bonus = Math.min(+K.bonus || 0, q.bonus_max_for_this_sale || 0);
-  const toPay = +(q.total - bonus).toFixed(2);
+  const ps = payState();
   const btn = $(hold ? '[data-hold]' : '[data-sell]'); if (btn) btn.disabled = true;
+  const items = K.cart.map(l => ({ product_id: l.p.id, qty: l.qty }));
   try {
-    const sale = await api('/api/sales', { method: 'POST', body: {
-      store_id: S.storeId, client_id: K.client?.id, promo_code: K.promo || null, hold,
-      items: K.cart.map(l => ({ product_id: l.p.id, qty: l.qty })),
-      bonus_to_use: hold ? 0 : bonus, payments: hold || toPay <= 0 ? [] : [{ method: K.pay, amount: toPay }],
-    } });
-    const change = !hold && K.pay === 'cash' && +K.received > toPay ? +K.received - toPay : 0;
-    Object.assign(K, { cart: [], client: null, promo: '', bonus: '', received: '', quote: null, qErr: '', pay: 'cash' });
-    K.done = hold ? `Чек №${sale.number} отложен. Найдёте его в «Отложенных чеках».` : `Продажа №${sale.number} проведена: ${money(sale.total)}${change ? `. Сдача ${money(change)}` : ''}${sale.bonus_earned ? `. Начислено бонусов: ${num(sale.bonus_earned)}` : ''}`;
+    let sale, extra = '';
+    if (K.exchange) {
+      const r = await api(`/api/sales/${K.exchange.sale.id}/exchange`, { method: 'POST', body: {
+        return_items: K.exchange.items.map(i => ({ sale_item_id: i.sale_item_id, qty: i.qty })), items, seller_id: K.seller,
+        payments: ps.payments, refund_method: K.refundMethod || 'cash', comment: K.note || null } });
+      sale = r.sale; extra = r.refund ? `. Вернуть клиенту ${money(r.refund)} ${K.refundMethod === 'card' ? 'на карту' : 'наличными'}` : '';
+    } else {
+      sale = await api('/api/sales', { method: 'POST', body: {
+        store_id: S.storeId, client_id: K.client?.id, promo_code: K.promo || null, hold, items, seller_id: K.seller, wholesale: K.wholesale, ...discBody(),
+        comment: K.note || null, bonus_to_use: hold ? 0 : ps.bonus, payments: hold ? [] : ps.payments,
+        debt_due_date: ps.usesDebt ? (K.due || iso(addDays(new Date(), S.company.debt_days_default || 30))) : null } });
+    }
+    const change = !hold ? ps.change : 0;
+    const wasExchange = !!K.exchange;
+    resetCheck();
+    K.lastSale = hold ? null : sale;
+    K.done = hold ? `Чек №${sale.number} отложен. Найдёте его в «Отложенных чеках».`
+      : `${wasExchange ? 'Обмен проведён, новый чек' : 'Продажа'} №${sale.number}: ${money(sale.total)}${change ? `. Сдача ${money(change)}` : ''}${sale.bonus_earned ? `. Начислено бонусов: ${num(sale.bonus_earned)}` : ''}${extra}`;
     const prods = await api('/api/products' + qs({ status: 'active', size: 500, store_id: S.storeId }));
     K.products = prods.items; $('#tiles').innerHTML = kassaTiles(); redrawCheck();
   } catch (e) { toast(e.message, true); if (btn) btn.disabled = false; }
@@ -509,6 +597,7 @@ async function heldModal() {
   const m = modal('Отложенные чеки', list.length ? list.map(s => `<div class="rcpt" style="font-size:14px">
     <div class="t"><span>№${s.number} · ${fDateTime(s.created_at)}</span><b>${money(s.total)}</b></div>
     <div class="t"><span>${esc(s.items.map(i => `${i.name} × ${num(i.qty)}`).join(', '))}</span></div>
+    ${s.comment ? `<div class="note">${esc(s.comment)}</div>` : ''}
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px"><button class="btn sm" data-paid="${s.id}" data-m="cash">Оплатить наличными</button><button class="btn sm" data-paid="${s.id}" data-m="card">Картой</button>
     ${s.client_id ? `<button class="btn sm ghost" data-paid="${s.id}" data-m="debt">В долг</button>` : ''}<button class="btn sm danger" data-cancel="${s.id}">Отменить</button></div></div>`).join('')
     : '<p class="empty">Отложенных чеков нет.</p>');
@@ -523,43 +612,116 @@ async function heldModal() {
     } catch (x) { toast(x.message, true); b.disabled = false; }
   };
 }
+// возврат и обмен прямо из кассы: поиск чека
+async function returnsModal() {
+  const m = modal('Возврат и обмен', `<label class="search" style="min-height:46px;margin-bottom:12px"><input id="rq" type="number" placeholder="Номер чека" aria-label="Номер чека"></label><div id="rlist"><div class="empty">Загружаю…</div></div>`, { wide: true });
+  const load = async num_ => {
+    const r = await api('/api/sales' + qs({ number: num_ || '', date_from: num_ ? '' : iso(addDays(new Date(), -13)), date_to: num_ ? '' : today(), size: 30, store_id: S.stores.length > 1 ? S.storeId : '' }));
+    $('#rlist', m.el).innerHTML = r.items.length ? r.items.map(s => `<div class="rcpt click" data-sale="${s.id}" style="cursor:pointer;font-size:14px"><div class="t"><span>№${s.number} · ${fDateTime(s.created_at)}</span><b>${money(s.total)}</b></div>
+      <div class="t"><span>${esc(s.items.map(i => i.name).slice(0, 3).join(', '))}</span><span class="muted">${s.items.reduce((a, i) => a + i.qty, 0)} ед.</span></div></div>`).join('') : '<p class="empty">Чеков не найдено</p>';
+    $('#rlist', m.el).onclick = e => { const x = e.target.closest('[data-sale]'); if (x) { m.close(); saleModal(r.items.find(s => s.id === +x.dataset.sale)); } };
+  };
+  $('#rq', m.el).oninput = debounce(e => load(e.target.value), 300);
+  load('');
+}
+function startExchange(sale, items, client) {
+  resetCheck();
+  const credit = +items.reduce((a, i) => a + i.amount, 0).toFixed(2);
+  K.exchange = { sale, items, credit, client };
+  K.done = null; K.lastSale = null;
+  if (location.hash === '#kassa') route(); else location.hash = '#kassa';
+}
+// печать чека
+function printReceipt(s) {
+  const st = S.stores.find(x => x.id === s.store_id)?.name || '';
+  const w = window.open('', '_blank', 'width=380,height=640');
+  if (!w) { toast('Браузер заблокировал окно печати. Разрешите всплывающие окна для этого сайта', true); return; }
+  w.document.write(`<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><title>Чек №${s.number}</title><style>
+    body{font:13px/1.45 "IBM Plex Mono",ui-monospace,Menlo,monospace;margin:0;padding:16px;width:280px;color:#000}
+    h1{font-size:16px;text-align:center;margin:0 0 2px}p{margin:0;text-align:center}.r{display:flex;justify-content:space-between;gap:8px}
+    hr{border:0;border-top:1px dashed #000;margin:8px 0}.b{font-weight:700;font-size:15px}@media print{@page{margin:0}}</style></head><body>
+    <h1>${esc(S.company.name)}</h1><p>${esc(st)}</p><p>Чек №${s.number}</p><p>${fDateTime(s.created_at)}</p><hr>
+    ${s.items.map(i => `<div>${esc(i.name)}</div><div class="r"><span>${num(i.qty)} × ${num(i.price)}</span><span>${num(i.price * i.qty)}</span></div>${i.discount ? `<div class="r"><span>скидка</span><span>−${num(i.discount)}</span></div>` : ''}`).join('')}
+    <hr>${s.discount ? `<div class="r"><span>Скидка</span><span>−${num(s.discount)}</span></div>` : ''}<div class="r b"><span>ИТОГО</span><span>${money(s.total)}</span></div>
+    ${s.payments.map(p => `<div class="r"><span>${PAY[p.method] || p.method}</span><span>${num(p.amount)}</span></div>`).join('')}
+    ${s.bonus_earned ? `<div class="r"><span>Начислено бонусов</span><span>${num(s.bonus_earned)}</span></div>` : ''}
+    ${s.comment ? `<hr><div>${esc(s.comment)}</div>` : ''}<hr><p>Спасибо за покупку!</p>
+    <script>window.onload=()=>{window.print();setTimeout(()=>window.close(),300)}<\/script></body></html>`);
+  w.document.close();
+}
 
 // ================= ПРОДАЖИ =================
-const SL = { period: 'week', status: 'completed', page: 1, num: '' };
+const SL = { period: 'today', status: 'completed', page: 1, num: '' };
 async function viewSales(v) {
   const r = periodRange(SL.period);
-  const [res, clients] = await Promise.all([
+  const [res, clients, sellers, sum] = await Promise.all([
     api('/api/sales' + qs({ store_id: S.stores.length > 1 ? S.storeId : '', status: SL.status, number: SL.num, date_from: SL.num ? '' : r.from, date_to: SL.num ? '' : r.to, page: SL.page, size: 50 })),
     can('clients.read') ? api('/api/clients' + qs({ size: 500 })) : { items: [] },
+    can('sales.create') ? api('/api/sales/sellers') : [],
+    can('reports.read') ? api('/api/reports/dashboard' + qs({ date_from: r.from, date_to: r.to, store_id: S.stores.length > 1 ? S.storeId : '' })) : null,
   ]);
   const cn = Object.fromEntries(clients.items.map(c => [c.id, c.name]));
-  const sum = res.items.reduce((a, s) => a + s.total - s.returned_total, 0);
-  v.innerHTML = `<div class="head"><div><h1>Продажи</h1><p class="sub">${res.total} ${plural(res.total, 'чек', 'чека', 'чеков')}${SL.status === 'completed' && res.items.length ? `, на странице ${money(sum)} с учётом возвратов` : ''}</p></div>
+  const sn = Object.fromEntries(sellers.map(s => [s.id, s.name]));
+  const t = sum?.transactions, p = sum?.payments;
+  const side = sum ? `<aside class="aside grid" style="align-content:start">
+    ${can('reports.read') ? '<button class="btn" data-a="xreport">Распечатать отчёт за период</button>' : ''}
+    <section class="panel"><h2>Транзакции: ${t.count}</h2>
+      <div class="tbl-wrap"><table><tbody>
+        <tr><td>Товары</td><td class="r">${num(t.goods_qty)} шт</td></tr><tr><td>Услуги</td><td class="r">${num(t.services_qty)} шт</td></tr>
+        <tr><td>Возвраты</td><td class="r">${t.returns_count} · ${money(t.returns_amount)}</td></tr>
+        <tr><td>Обмены</td><td class="r">${t.exchanges_count} · ${money(t.exchanges_amount)}</td></tr>
+        <tr><td>Средний чек</td><td class="r">${money(t.average_check)}</td></tr></tbody></table></div></section>
+    <section class="panel"><h2>Сумма транзакций</h2><b style="font-size:26px" class="num">${money(sum.revenue.gross)}</b>
+      <div class="tbl-wrap" style="margin-top:8px"><table><tbody>
+        <tr><td>Наличные</td><td class="r">${money(p.cash)}</td></tr><tr><td>Карта</td><td class="r">${money(p.card)}</td></tr>
+        <tr><td>В долг</td><td class="r ${p.debt ? 'bad' : ''}">${money(p.debt)}</td></tr>${p.bonus ? `<tr><td>Бонусами</td><td class="r">${money(p.bonus)}</td></tr>` : ''}
+        ${p.exchange ? `<tr><td>Зачёт по обменам</td><td class="r">${money(p.exchange)}</td></tr>` : ''}
+        <tr><td><b>Чистая выручка</b></td><td class="r"><b>${money(sum.revenue.net)}</b></td></tr></tbody></table></div></section></aside>` : '';
+  v.innerHTML = `<div class="head"><div><h1>Продажи</h1><p class="sub">${res.total} ${plural(res.total, 'чек', 'чека', 'чеков')} · ${r.from === r.to ? fDay(r.from) : `${fDay(r.from)} — ${fDay(r.to)}`}</p></div>
     ${can('sales.create') ? '<a class="btn" href="#kassa">Новая продажа</a>' : ''}</div>
-  <div class="panel"><div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:12px">
+  <div class="row"><div class="grow panel"><div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:12px">
     ${segPeriods(SL.period)}
     <select class="input" id="slStatus" style="width:auto"><option value="completed" ${SL.status === 'completed' ? 'selected' : ''}>Проведённые</option><option value="held" ${SL.status === 'held' ? 'selected' : ''}>Отложенные</option><option value="cancelled" ${SL.status === 'cancelled' ? 'selected' : ''}>Отменённые</option></select>
     <input class="input" id="slNum" type="number" placeholder="№ чека" value="${esc(SL.num)}" style="width:130px" aria-label="Номер чека"></div>
-    ${res.items.length ? `<div class="tbl-wrap"><table><thead><tr><th>№</th><th>Дата</th><th>Клиент</th><th>Товары</th><th>Оплата</th><th class="r">Сумма</th></tr></thead><tbody>
-      ${res.items.map(s => `<tr class="click" data-sale="${s.id}" tabindex="0"><td class="num">${s.number}</td><td>${fDateTime(s.created_at)}</td><td>${esc(cn[s.client_id] || (s.client_id ? 'Клиент' : '—'))}</td>
-        <td>${esc(s.items.map(i => i.name).slice(0, 2).join(', '))}${s.items.length > 2 ? ` +${s.items.length - 2}` : ''}</td>
-        <td>${s.payments.map(p => `<span class="tag ${PAY_TAG[p.method]}">${PAY[p.method]}</span>`).join(' ') || '<span class="tag grey">не оплачен</span>'}</td>
+    ${res.items.length ? `<div class="tbl-wrap"><table><thead><tr><th>№</th><th>Дата</th><th>Клиент</th><th>Продавец</th><th>Товары</th><th>Оплата</th><th class="r">Сумма</th></tr></thead><tbody>
+      ${res.items.map(s => `<tr class="click" data-sale="${s.id}" tabindex="0"><td class="num">${s.number}${s.exchange_of_id ? ' <span class="tag grey">обмен</span>' : ''}</td><td>${fDateTime(s.created_at)}</td><td>${esc(cn[s.client_id] || (s.client_id ? 'Клиент' : '—'))}</td>
+        <td>${esc(sn[s.seller_id] || '—')}</td><td>${esc(s.items.map(i => i.name).slice(0, 2).join(', '))}${s.items.length > 2 ? ` +${s.items.length - 2}` : ''}</td>
+        <td>${s.payments.map(p => `<span class="tag ${PAY_TAG[p.method] ?? 'grey'}">${PAY[p.method] || p.method}</span>`).join(' ') || '<span class="tag grey">не оплачен</span>'}</td>
         <td class="r"><b>${money(s.total)}</b>${s.returned_total ? `<br><small class="bad">возврат ${num(s.returned_total)}</small>` : ''}</td></tr>`).join('')}</tbody></table></div>
-      ${pager(res.total, SL.page, 50)}` : '<p class="empty">За выбранный период продаж нет.</p>'}</div>`;
+      ${pager(res.total, SL.page, 50)}` : '<p class="empty">За выбранный период продаж нет.</p>'}</div>${side}</div>`;
   v.onclick = e => {
     const pb = e.target.closest('[data-period]'); if (pb) { SL.period = pb.dataset.period; SL.page = 1; route(); return; }
     const pg = e.target.closest('[data-page]'); if (pg) { SL.page = +pg.dataset.page; route(); return; }
-    const tr = e.target.closest('[data-sale]'); if (tr) saleModal(res.items.find(s => s.id === +tr.dataset.sale), cn);
+    if (e.target.closest('[data-a=xreport]')) { printPeriodReport(sum, r); return; }
+    const tr = e.target.closest('[data-sale]'); if (tr) saleModal(res.items.find(s => s.id === +tr.dataset.sale), cn, sn);
   };
   v.onkeydown = e => { const tr = e.target.closest('[data-sale]'); if (tr && e.key === 'Enter') tr.click(); };
   v.onchange = e => { if (e.target.id === 'slStatus') { SL.status = e.target.value; SL.page = 1; route(); } if (e.target.id === 'slNum') { SL.num = e.target.value; route(); } };
 }
+function printPeriodReport(d, r) {
+  const w = window.open('', '_blank', 'width=420,height=700');
+  if (!w) { toast('Браузер заблокировал окно печати. Разрешите всплывающие окна для этого сайта', true); return; }
+  const t = d.transactions, p = d.payments, row = (a, b) => `<div class="r"><span>${a}</span><span>${b}</span></div>`;
+  w.document.write(`<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><title>Отчёт за период</title><style>
+    body{font:13px/1.5 "IBM Plex Mono",ui-monospace,monospace;margin:0;padding:16px;width:300px}h1{font-size:16px;text-align:center;margin:0}
+    p{text-align:center;margin:0}.r{display:flex;justify-content:space-between}hr{border:0;border-top:1px dashed #000;margin:8px 0}b{font-size:15px}</style></head><body>
+    <h1>${esc(S.company.name)}</h1><p>Отчёт ${r.from === r.to ? 'за ' + fDay(r.from) : `${fDay(r.from)} — ${fDay(r.to)}`}</p><p>Распечатан ${new Date().toLocaleString('ru-RU')}</p><hr>
+    ${row('Чеков', t.count)}${row('Товаров, шт', num(t.goods_qty))}${row('Услуг, шт', num(t.services_qty))}${row('Средний чек', num(t.average_check))}<hr>
+    ${row('Наличные', num(p.cash))}${row('Карта', num(p.card))}${row('В долг', num(p.debt))}${p.bonus ? row('Бонусами', num(p.bonus)) : ''}${p.exchange ? row('Зачёт обменов', num(p.exchange)) : ''}<hr>
+    ${row('Продажи', num(d.revenue.gross))}${row(`Возвраты (${t.returns_count})`, '−' + num(t.returns_amount))}${row(`Обмены (${t.exchanges_count})`, num(t.exchanges_amount))}
+    <hr><div class="r"><b>Чистая выручка</b><b>${money(d.revenue.net)}</b></div>
+    <script>window.onload=()=>{window.print();setTimeout(()=>window.close(),300)}<\/script></body></html>`);
+  w.document.close();
+}
 const pager = (total, page, size) => total <= size ? '' : `<div class="pager"><span>${(page - 1) * size + 1}–${Math.min(total, page * size)} из ${total}</span>
   <button class="btn ghost sm" data-page="${page - 1}" ${page <= 1 ? 'disabled' : ''}>Назад</button><button class="btn ghost sm" data-page="${page + 1}" ${page * size >= total ? 'disabled' : ''}>Дальше</button></div>`;
-async function saleModal(s, cn = {}) {
+async function saleModal(s, cn = {}, sn = {}) {
   const returns = s.status === 'completed' ? await api(`/api/sales/${s.id}/returns`) : [];
+  const client = s.client_id ? await api(`/api/clients/${s.client_id}`).catch(() => null) : null;
   const canRet = can('sales.return') && s.status === 'completed' && s.items.some(i => i.qty > i.returned_qty);
-  const m = modal(`Чек №${s.number}`, `<p class="sub" style="margin-top:-8px">${fDateTime(s.created_at)}${s.client_id ? ` · ${esc(cn[s.client_id] || 'клиент')}` : ''}</p>
+  const RM = { cash: 'наличными', card: 'на карту', debt: 'в счёт долга', exchange: 'обмен', 'exchange+cash': 'обмен, разница наличными', 'exchange+card': 'обмен, разница на карту', 'debt+cash': 'в счёт долга и наличными' };
+  const m = modal(`Чек №${s.number}`, `<p class="sub" style="margin-top:-8px">${fDateTime(s.created_at)}${client ? ` · ${esc(client.name)}` : ''}${sn[s.seller_id] ? ` · продавец ${esc(sn[s.seller_id])}` : ''}</p>
+    ${s.comment ? `<p class="note">${esc(s.comment)}</p>` : ''}
     <form class="form" id="retForm"><div class="tbl-wrap"><table><thead><tr><th>Товар</th><th class="r">Кол-во</th><th class="r">Цена</th><th class="r">Скидка</th><th class="r">Сумма</th>${canRet ? '<th class="r">Вернуть</th>' : ''}</tr></thead><tbody>
     ${s.items.map(i => `<tr><td>${esc(i.name)}${i.returned_qty ? `<br><small class="bad">возвращено ${num(i.returned_qty)}</small>` : ''}</td><td class="r">${num(i.qty)}</td><td class="r">${num(i.price)}</td><td class="r">${i.discount ? '−' + num(i.discount) : ''}</td><td class="r"><b>${num(i.total)}</b></td>
       ${canRet ? `<td class="r">${i.qty > i.returned_qty ? `<input class="input num" style="width:80px;min-height:36px" type="number" min="0" max="${i.qty - i.returned_qty}" step="1" name="r${i.id}" value="0" aria-label="Вернуть ${esc(i.name)}">` : ''}</td>` : ''}</tr>`).join('')}
@@ -567,20 +729,31 @@ async function saleModal(s, cn = {}) {
     <div class="mono" style="display:grid;gap:4px;font-size:14px">
       ${s.discount ? `<div style="display:flex;justify-content:space-between"><span>Скидка</span><span>−${num(s.discount)}</span></div>` : ''}
       <div style="display:flex;justify-content:space-between;font-weight:600"><span>Итого</span><span>${money(s.total)}</span></div>
-      ${s.payments.map(p => `<div style="display:flex;justify-content:space-between" class="muted"><span>${PAY[p.method]}</span><span>${num(p.amount)}</span></div>`).join('')}
+      ${s.payments.map(p => `<div style="display:flex;justify-content:space-between" class="muted"><span>${PAY[p.method] || p.method}</span><span>${num(p.amount)}</span></div>`).join('')}
       ${s.bonus_earned ? `<div style="display:flex;justify-content:space-between" class="muted"><span>Начислено бонусов</span><span>${num(s.bonus_earned)}</span></div>` : ''}
-      ${returns.map(r => `<div style="display:flex;justify-content:space-between" class="bad"><span>Возврат ${fDateTime(r.created_at)} (${PAY[r.refund_method] || r.refund_method})</span><span>−${num(r.amount)}</span></div>`).join('')}</div>
+      ${returns.map(r => `<div style="display:flex;justify-content:space-between" class="bad"><span>${r.refund_method.startsWith('exchange') ? 'Обмен' : 'Возврат'} ${fDateTime(r.created_at)} (${RM[r.refund_method] || r.refund_method})</span><span>−${num(r.amount)}</span></div>`).join('')}</div>
     ${canRet ? `<div class="two">${field('Как вернуть деньги', `<select class="input" name="refund_method"><option value="cash">Наличными</option><option value="card">На карту</option>${s.client_id ? '<option value="debt">Уменьшить долг клиента</option>' : ''}</select>`)}${field('Причина', inp('reason', { ph: 'Например, брак' }))}</div>
-      <div class="err" hidden></div><div class="modal-f" style="margin-top:0"><button class="btn danger" type="submit">Оформить возврат</button></div>` : ''}</form>`, { wide: true });
-  const f = $('#retForm', m.el);
+      <div class="err" hidden></div>
+      <div class="modal-f" style="margin-top:0">${can('sales.create') ? '<button class="btn ghost" type="button" data-exch>Обменять выбранное</button>' : ''}<button class="btn danger" type="submit">Оформить возврат</button></div>` : ''}
+    <div class="modal-f" style="margin-top:0"><button class="btn ghost" type="button" data-printsale>Печать чека</button></div></form>`, { wide: true });
+  const f = $('#retForm', m.el), err = () => $('.err', f);
+  const picked = () => { const d = Object.fromEntries(new FormData(f)); return { d, items: s.items.map(i => ({ i, qty: +(d['r' + i.id] || 0) })).filter(x => x.qty > 0) }; };
+  $('[data-printsale]', m.el).onclick = () => printReceipt(s);
+  const ex = $('[data-exch]', m.el);
+  if (ex) ex.onclick = () => {
+    const { items } = picked();
+    if (!items.length) { err().textContent = 'Отметьте в колонке «Вернуть», какие товары клиент меняет'; err().hidden = false; return; }
+    m.close();
+    startExchange(s, items.map(({ i, qty }) => ({ sale_item_id: i.id, qty, name: i.name, amount: Math.round(i.total * qty / i.qty * 100) / 100 })), client);
+    toast('Выберите новые товары на кассе — сумма возврата пойдёт в зачёт');
+  };
   f.onsubmit = async e => {
     e.preventDefault();
-    const d = Object.fromEntries(new FormData(f));
-    const items = s.items.map(i => ({ sale_item_id: i.id, qty: +(d['r' + i.id] || 0) })).filter(x => x.qty > 0);
-    const err = $('.err', f);
-    if (!items.length) { err.textContent = 'Укажите, сколько штук вернуть'; err.hidden = false; return; }
-    try { const r = await api(`/api/sales/${s.id}/returns`, { method: 'POST', body: { items, refund_method: d.refund_method, reason: d.reason || null } }); m.close(); toast(`Возврат оформлен: ${money(r.amount)}`); route(); }
-    catch (x) { err.textContent = x.message; err.hidden = false; }
+    const { d, items } = picked();
+    if (!items.length) { err().textContent = 'Укажите, сколько штук вернуть'; err().hidden = false; return; }
+    try { const r = await api(`/api/sales/${s.id}/returns`, { method: 'POST', body: { items: items.map(x => ({ sale_item_id: x.i.id, qty: x.qty })), refund_method: d.refund_method, reason: d.reason || null } });
+      m.close(); toast(`Возврат оформлен: ${money(r.amount)}${r.refund_method === 'debt+cash' ? '. Часть сверх долга отдайте наличными' : ''}`); route(); }
+    catch (x) { err().textContent = x.message; err().hidden = false; }
   };
 }
 
@@ -635,6 +808,7 @@ async function productModal(p) {
     <div class="two">${field('Артикул', inp('sku', { value: p?.sku || '' }))}${field('Штрихкод', inp('barcode', { value: p?.barcode || '' }))}</div>
     <div class="two">${field('Категория', `<select class="input" name="category_id">${opts(S.cats, p?.category_id, 'id', 'name', 'Без категории')}</select>`)}${field('Или новая категория', inp('new_category', { ph: 'Название новой категории' }))}</div>
     <div class="two">${field('Розничная цена', inp('retail_price', { type: 'number', step: '0.01', min: 0, value: p?.retail_price ?? '', req: true }))}${field('Себестоимость', inp('cost_price', { type: 'number', step: '0.01', min: 0, value: p?.cost_price ?? '' }))}</div>
+    ${field('Оптовая цена (необязательно)', inp('wholesale_price', { type: 'number', step: '0.01', min: 0, value: p?.wholesale_price ?? '', ph: 'Если пусто — продаётся по рознице' }))}
     <div class="two">${field('Единица', inp('unit', { value: p?.unit || 'шт' }))}${isNew ? field('Начальный остаток', inp('qty', { type: 'number', step: '1', min: 0, ph: '0' })) : '<span></span>'}</div>
     <label class="check"><input type="checkbox" name="is_service" ${p?.is_service ? 'checked' : ''}> Это услуга (без остатка на складе)</label>
     ${!isNew ? `<label class="check"><input type="checkbox" name="is_active" ${p.is_active ? 'checked' : ''}> Продаётся (виден на кассе)</label>` : ''}
@@ -643,7 +817,7 @@ async function productModal(p) {
   if (!edit) { modal(p.name, `<p>Цена: <b>${money(p.retail_price)}</b>. Остаток: <b>${num(stockOf(p))} ${esc(p.unit)}</b></p>${history}`, { wide: true }); return; }
   formModal(isNew ? 'Новый товар' : p.name, fields, async (d, m) => {
     const category_id = await ensureCategory(d);
-    const base = { name: d.name, sku: d.sku || null, barcode: d.barcode || null, category_id, unit: d.unit || 'шт', is_service: !!d.is_service, cost_price: nOrNull(d.cost_price) ?? 0 };
+    const base = { name: d.name, sku: d.sku || null, barcode: d.barcode || null, category_id, unit: d.unit || 'шт', is_service: !!d.is_service, cost_price: nOrNull(d.cost_price) ?? 0, wholesale_price: nOrNull(d.wholesale_price) };
     if (isNew) {
       const np = await api('/api/products', { method: 'POST', body: { ...base, retail_price: nOrNull(d.retail_price) ?? 0 } });
       const q = nOrNull(d.qty);
@@ -705,16 +879,23 @@ function importModal() {
 // ================= КЛИЕНТЫ =================
 const C = { q: '', debt: false, page: 1 };
 async function viewClients(v) {
-  const [res, sum, groups] = await Promise.all([
-    api('/api/clients' + qs({ q: C.q, has_debt: C.debt, page: C.page, size: 50 })), api('/api/clients/debts/summary'), api('/api/client-groups')]);
+  const [res, stats, groups] = await Promise.all([
+    api('/api/clients' + qs({ q: C.q, has_debt: C.debt, page: C.page, size: 50 })), api('/api/clients/stats'), api('/api/client-groups')]);
   const gn = Object.fromEntries(groups.map(g => [g.id, g.name]));
-  v.innerHTML = `<div class="head"><div><h1>Клиенты</h1><p class="sub">${sum.debtors ? `${sum.debtors} ${plural(sum.debtors, 'клиент должен', 'клиента должны', 'клиентов должны')} в сумме <b class="bad">${money(sum.total_debt)}</b>` : 'Долгов нет'}</p></div>
-    <div style="display:flex;gap:10px;flex-wrap:wrap">${can('marketing.manage') ? '<button class="btn ghost" data-a="groups">Группы и скидки</button>' : ''}${can('clients.write') ? '<button class="btn" data-a="new">Новый клиент</button>' : ''}</div></div>
+  v.innerHTML = `<div class="head"><div><h1>Клиенты</h1><p class="sub">База покупателей, их покупки, бонусы и долги</p></div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">${can('marketing.manage') ? '<button class="btn ghost" data-a="groups">Группы и скидки</button>' : ''}<a class="btn ghost" href="#debts">Долги клиентов</a>${can('clients.write') ? '<button class="btn" data-a="new">Новый клиент</button>' : ''}</div></div>
+  <div class="kpis">
+    <div class="kpi"><span>Всего клиентов</span><b>${stats.total}</b></div>
+    <div class="kpi"><span>Новые за неделю</span><b class="${stats.new_week ? 'good' : ''}">+${stats.new_week}</b></div>
+    <div class="kpi"><span>Не возвращаются</span><b class="${stats.not_returning ? 'warn' : ''}">${stats.not_returning}</b><small class="muted">не покупали 60+ дней</small></div>
+    <div class="kpi"><span>Дни рождения</span><b>${stats.birthdays}</b><small class="muted">в ближайшие 7 дней</small></div></div>
   <div class="panel"><div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:12px">
     <label class="search" style="flex:1 1 280px;min-height:44px"><input id="cq" placeholder="Имя или телефон" value="${esc(C.q)}" aria-label="Поиск клиента"></label>
     <label class="check"><input type="checkbox" id="cdebt" ${C.debt ? 'checked' : ''}> Только должники</label></div>
-    ${res.items.length ? `<div class="tbl-wrap"><table><thead><tr><th>Имя</th><th>Телефон</th><th>Группа</th><th class="r">Бонусы</th><th class="r">Долг</th></tr></thead><tbody>
+    ${res.items.length ? `<div class="tbl-wrap"><table><thead><tr><th>Имя</th><th>Телефон</th><th>Группа</th><th>Пол</th><th class="r">Покупки</th><th class="r">Последняя</th><th class="r">Бонусы</th><th class="r">Долг</th></tr></thead><tbody>
     ${res.items.map(c => `<tr class="click" data-c="${c.id}" tabindex="0"><td><b>${esc(c.name)}</b> ${(c.tags || []).map(t => `<span class="tag grey">${esc(t)}</span>`).join(' ')}</td><td>${esc(c.phone || '—')}</td><td>${esc(gn[c.group_id] || '—')}</td>
+      <td>${{ m: 'Муж.', f: 'Жен.' }[c.gender] || '—'}</td><td class="r">${c.purchases_count ? `${money(c.purchases_total)}<br><small class="muted">${c.purchases_count} ${plural(c.purchases_count, 'покупка', 'покупки', 'покупок')}</small>` : '—'}</td>
+      <td class="r">${c.last_purchase ? fDateTime(c.last_purchase).slice(0, 8) : '—'}</td>
       <td class="r">${num(c.bonus_balance)}</td><td class="r">${+c.debt_balance ? `<b class="bad">${money(c.debt_balance)}</b>` : '—'}</td></tr>`).join('')}</tbody></table></div>${pager(res.total, C.page, 50)}`
     : `<p class="empty">${C.q || C.debt ? 'Никого не нашли.' : 'Клиентов пока нет. Добавьте клиента здесь или прямо на кассе.'}</p>`}</div>`;
   const reload = debounce(() => { C.page = 1; route(); }, 350);
@@ -734,37 +915,61 @@ async function clientModal(c, done, preset = {}) {
   formModal(c ? 'Изменить клиента' : 'Новый клиент', `
     ${field('Имя', inp('name', { value: c?.name ?? preset.name ?? '', req: true }))}
     <div class="two">${field('Телефон', inp('phone', { type: 'tel', value: c?.phone || '', ph: '+998 90 123 45 67' }))}${field('Дата рождения', inp('birth_date', { type: 'date', value: c?.birth_date || '' }))}</div>
-    <div class="two">${field('Группа', `<select class="input" name="group_id">${opts(groups.map(g => ({ ...g, name: `${g.name}${+g.discount_percent ? ` (−${num(g.discount_percent)}%)` : ''}` })), c?.group_id, 'id', 'name', 'Без группы')}</select>`)}${field('Теги через запятую', inp('tags', { value: (c?.tags || []).join(', '), ph: 'опт, постоянный' }))}</div>
+    <div class="two">${field('Пол', `<select class="input" name="gender"><option value="">Не указан</option><option value="m" ${c?.gender === 'm' ? 'selected' : ''}>Мужской</option><option value="f" ${c?.gender === 'f' ? 'selected' : ''}>Женский</option></select>`)}
+      ${field('Группа', `<select class="input" name="group_id">${opts(groups.map(g => ({ ...g, name: `${g.name}${+g.discount_percent ? ` (−${num(g.discount_percent)}%)` : ''}` })), c?.group_id, 'id', 'name', 'Без группы')}</select>`)}</div>
+    ${field('Теги через запятую', inp('tags', { value: (c?.tags || []).join(', '), ph: 'опт, постоянный' }))}
     ${field('Заметка', `<textarea class="input" name="note">${esc(c?.note || '')}</textarea>`)}
     <label class="check"><input type="checkbox" name="sms_allowed" ${c?.sms_allowed ?? true ? 'checked' : ''}> Согласен получать SMS</label>`,
   async (d, m) => {
-    const body = { name: d.name, phone: d.phone || null, birth_date: d.birth_date || null, group_id: nOrNull(d.group_id), note: d.note || null,
+    const body = { name: d.name, phone: d.phone || null, birth_date: d.birth_date || null, group_id: nOrNull(d.group_id), note: d.note || null, gender: d.gender || null,
       tags: d.tags.split(',').map(s => s.trim()).filter(Boolean), sms_allowed: !!d.sms_allowed };
     const r = c ? await api(`/api/clients/${c.id}`, { method: 'PATCH', body }) : await api('/api/clients', { method: 'POST', body });
     m.close(); toast(c ? 'Клиент сохранён' : `Клиент «${r.name}» добавлен`); done?.(r);
   }, { submit: c ? 'Сохранить' : 'Добавить клиента' });
 }
-async function clientCard(c, groups) {
-  const [sales, pays] = await Promise.all([api(`/api/clients/${c.id}/sales`), api(`/api/clients/${c.id}/debt-payments`)]);
-  const total = sales.reduce((a, s) => a + s.total - s.returned_total, 0);
+async function clientCard(c, groups = []) {
+  const [sales, debts] = await Promise.all([api(`/api/clients/${c.id}/sales`), api('/api/debts' + qs({ q: c.phone || c.name, size: 100 }))]);
+  const myDebts = debts.items.filter(d => d.client_id === c.id);
   const m = modal(c.name, `<div class="kpis" style="margin-bottom:16px">
-      <div class="kpi" style="background:var(--bg)"><span>Покупок</span><b>${sales.length}</b><small class="muted">на ${money(total)}</small></div>
+      <div class="kpi" style="background:var(--bg)"><span>Покупок</span><b>${c.purchases_count}</b><small class="muted">на ${money(c.purchases_total)}</small></div>
       <div class="kpi" style="background:var(--bg)"><span>Бонусы</span><b>${num(c.bonus_balance)}</b></div>
       <div class="kpi" style="background:var(--bg)"><span>Долг</span><b class="${+c.debt_balance ? 'bad' : ''}">${money(c.debt_balance)}</b></div></div>
-    <p class="sub" style="margin:0 0 12px">${esc(c.phone || 'Телефон не указан')}${c.group_id ? ` · ${esc(groups.find(g => g.id === c.group_id)?.name || '')}` : ''}${c.note ? `<br>${esc(c.note)}` : ''}</p>
+    <p class="sub" style="margin:0 0 12px">${esc(c.phone || 'Телефон не указан')}${c.group_id ? ` · ${esc(groups.find(g => g.id === c.group_id)?.name || '')}` : ''}${c.birth_date ? ` · ДР ${fDay(c.birth_date)}` : ''}${c.note ? `<br>${esc(c.note)}` : ''}</p>
     ${+c.debt_balance && can('clients.write') ? `<form class="form panel" id="payDebt" style="background:var(--bg);margin-bottom:16px"><h2 style="font-size:16px">Принять оплату долга</h2>
       <div class="two">${field('Сумма', inp('amount', { type: 'number', step: '0.01', min: 0, value: c.debt_balance, req: true }))}${field('Способ', '<select class="input" name="method"><option value="cash">Наличные</option><option value="card">Карта</option></select>')}</div>
       <div class="err" hidden></div><button class="btn" type="submit">Принять оплату</button></form>` : ''}
-    <h2 style="font-size:16px">Последние покупки</h2>${sales.length ? `<div class="tbl-wrap"><table><tbody>${sales.slice(0, 10).map(s => `<tr><td>№${s.number}</td><td>${fDateTime(s.created_at)}</td><td>${s.payments.map(p => `<span class="tag ${PAY_TAG[p.method]}">${PAY[p.method]}</span>`).join(' ')}</td><td class="r"><b>${money(s.total)}</b></td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">Покупок пока нет.</p>'}
-    ${pays.length ? `<h2 style="font-size:16px;margin-top:16px">Оплаты долга</h2><div class="tbl-wrap"><table><tbody>${pays.slice(0, 10).map(p => `<tr><td>${fDateTime(p.created_at)}</td><td>${PAY[p.method]}</td><td class="r good">${money(p.amount)}</td></tr>`).join('')}</tbody></table></div>` : ''}
-    <div class="modal-f">${can('clients.write') ? '<button class="btn ghost" data-edit>Изменить</button>' : ''}<button class="btn" data-close>Закрыть</button></div>`, { wide: true });
+    ${myDebts.length ? `<h2 style="font-size:16px">Долги</h2><div class="tbl-wrap"><table><tbody>${myDebts.map(d => `<tr><td>${d.sale_number ? `Чек №${d.sale_number}` : esc(d.note || 'Долг')}<br><small class="muted">до ${d.due_date ? fDay(d.due_date) : '—'}</small></td><td>${debtTag(d.status)}</td><td class="r">${money(d.left)}<br><small class="muted">из ${num(d.amount)}</small></td></tr>`).join('')}</tbody></table></div>` : ''}
+    <h2 style="font-size:16px;margin-top:16px">Последние покупки</h2>${sales.length ? `<div class="tbl-wrap"><table><tbody>${sales.slice(0, 10).map(s => `<tr><td>№${s.number}</td><td>${fDateTime(s.created_at)}</td><td>${s.payments.map(p => `<span class="tag ${PAY_TAG[p.method] ?? 'grey'}">${PAY[p.method] || p.method}</span>`).join(' ')}</td><td class="r"><b>${money(s.total)}</b></td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">Покупок пока нет.</p>'}
+    <div class="modal-f"><button class="btn ghost" data-act>Акт сверки</button>${can('clients.write') ? '<button class="btn ghost" data-edit>Изменить</button>' : ''}<button class="btn" data-close>Закрыть</button></div>`, { wide: true });
   $('[data-edit]', m.el)?.addEventListener('click', () => { m.close(); clientModal(c, () => route()); });
+  $('[data-act]', m.el).onclick = () => statementModal(c);
   const f = $('#payDebt', m.el);
   if (f) f.onsubmit = async e => {
     e.preventDefault(); const d = Object.fromEntries(new FormData(f));
     try { await api(`/api/clients/${c.id}/debt-payments`, { method: 'POST', body: { amount: nOrNull(d.amount), method: d.method, store_id: S.storeId } }); m.close(); toast(`Оплата долга принята: ${money(d.amount)}`); route(); }
     catch (x) { const err = $('.err', f); err.textContent = x.message; err.hidden = false; }
   };
+}
+function statementModal(c) {
+  formModal(`Акт сверки: ${c.name}`, `<div class="two">${field('С', inp('from', { type: 'date', value: iso(addDays(new Date(), -89)) }))}${field('По', inp('to', { type: 'date', value: today() }))}</div>`,
+  async (d, m) => {
+    const st = await api(`/api/clients/${c.id}/statement` + qs({ date_from: d.from, date_to: d.to }));
+    m.close();
+    const w = window.open('', '_blank', 'width=760,height=800');
+    if (!w) throw new Error('Браузер заблокировал окно печати');
+    w.document.write(`<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><title>Акт сверки — ${esc(c.name)}</title><style>
+      body{font:14px/1.5 Onest,system-ui,sans-serif;margin:32px;color:#131A2C}h1{font-size:22px;margin:0 0 4px}table{width:100%;border-collapse:collapse;margin:16px 0}
+      th,td{border-bottom:1px solid #ccc;padding:6px 8px;text-align:left}td.r,th.r{text-align:right}tfoot td{font-weight:700}.sign{display:flex;justify-content:space-between;margin-top:48px}</style></head><body>
+      <h1>Акт сверки взаиморасчётов</h1><p>${esc(S.company.name)} и ${esc(c.name)}${c.phone ? `, ${esc(c.phone)}` : ''}<br>Период: ${fDay(d.from)}.${d.from.slice(0, 4)} — ${fDay(d.to)}.${d.to.slice(0, 4)}</p>
+      <table><thead><tr><th>Дата</th><th>Операция</th><th class="r">Долг +</th><th class="r">Оплата −</th></tr></thead><tbody>
+      <tr><td></td><td>Долг на начало периода</td><td class="r" colspan="2">${money(st.opening)}</td></tr>
+      ${st.rows.map(r => `<tr><td>${fDateTime(r.date)}</td><td>${esc(r.title)}</td><td class="r">${r.debit ? num(r.debit) : ''}</td><td class="r">${r.credit ? num(r.credit) : ''}</td></tr>`).join('')}</tbody>
+      <tfoot><tr><td></td><td>Обороты за период</td><td class="r">${num(st.debit)}</td><td class="r">${num(st.credit)}</td></tr>
+      <tr><td></td><td>Долг на конец периода</td><td class="r" colspan="2">${money(st.closing)}</td></tr></tfoot></table>
+      <div class="sign"><span>${esc(S.company.name)} ____________</span><span>${esc(c.name)} ____________</span></div>
+      <script>window.onload=()=>window.print()<\/script></body></html>`);
+    w.document.close();
+  }, { submit: 'Сформировать и распечатать' });
 }
 function groupsModal(groups) {
   const m = modal('Группы клиентов', `<p class="sub" style="margin-top:-6px">Скидка группы применяется на кассе автоматически, если выбран клиент из этой группы.</p>
@@ -777,6 +982,127 @@ function groupsModal(groups) {
     try { await api('/api/client-groups', { method: 'POST', body: { name: d.name, discount_percent: nOrNull(d.discount_percent) || 0 } }); m.close(); toast('Группа добавлена'); route(); }
     catch (x) { const err = $('.err', f); err.textContent = x.message; err.hidden = false; }
   };
+}
+
+// ================= ДОЛГИ =================
+const DEBT_ST = { overdue: ['Просрочен', 'red'], unpaid: ['Не погашен', 'amber'], partial: ['Частично', ''], paid: ['Погашен', 'green'] };
+const debtTag = s => `<span class="tag ${DEBT_ST[s]?.[1] ?? 'grey'}">${DEBT_ST[s]?.[0] || s}</span>`;
+const DB = { tab: 'debts', status: 'all', q: '', page: 1, sel: new Set() };
+async function viewDebts(v) {
+  const isPay = DB.tab === 'payments';
+  const data = isPay ? await api('/api/debts/payments' + qs({ q: DB.q, page: DB.page, size: 50 }))
+    : await api('/api/debts' + qs({ status: DB.status, q: DB.q, page: DB.page, size: 50 }));
+  const sum = isPay ? null : data.summary;
+  const all = isPay ? null : await api('/api/debts' + qs({ size: 1 }));
+  const sm = (sum && DB.status === 'all' && !DB.q) ? sum : all?.summary;
+  const w = can('clients.write');
+  v.innerHTML = `<div class="head"><div><h1>Долги клиентов</h1><p class="sub">${sm ? `${sm.debtors} ${plural(sm.debtors, 'должник', 'должника', 'должников')}, к получению ${money(sm.left)}${sm.overdue_sum ? `, из них просрочено <b class="bad">${money(sm.overdue_sum)}</b>` : ''}` : 'Все принятые оплаты долгов'}</p></div>
+    <div class="seg"><button data-tab="debts" class="${!isPay ? 'on' : ''}">Долги</button><button data-tab="payments" class="${isPay ? 'on' : ''}">Погашения</button></div></div>
+  ${sm ? `<div class="kpis"><div class="kpi"><span>Сумма долгов</span><b>${money(sm.total)}</b></div><div class="kpi"><span>Погашено</span><b class="good">${money(sm.paid)}</b></div>
+    <div class="kpi"><span>Остаток долгов</span><b class="${sm.left ? 'bad' : ''}">${money(sm.left)}</b></div><div class="kpi"><span>Просрочено</span><b class="${sm.overdue ? 'bad' : ''}">${sm.overdue}</b><small class="muted">${plural(sm.overdue, 'долг', 'долга', 'долгов')}</small></div></div>` : ''}
+  <div class="panel"><div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:12px">
+    ${isPay ? '' : `<div class="chips">${[['all', 'Все'], ['overdue', 'Просроченные'], ['unpaid', 'Непогашенные'], ['partial', 'Частично'], ['paid', 'Погашенные']].map(([k, t]) => `<button class="chip ${DB.status === k ? 'on' : ''}" data-st="${k}">${t}${k !== 'all' && sm ? `<small>${sm[k]}</small>` : ''}</button>`).join('')}</div>`}
+    <label class="search" style="flex:1 1 220px;min-height:44px"><input id="dq" placeholder="Клиент или телефон" value="${esc(DB.q)}" aria-label="Поиск"></label>
+    ${!isPay && w ? `<button class="btn" data-mass ${DB.sel.size ? '' : 'disabled'}>Погасить выбранные${DB.sel.size ? ` (${DB.sel.size})` : ''}</button>` : ''}</div>
+  ${isPay ? (data.items.length ? `<div class="tbl-wrap"><table><thead><tr><th>Дата</th><th>Клиент</th><th>Способ</th><th class="r">Сумма</th></tr></thead><tbody>${data.items.map(p => `<tr><td>${fDateTime(p.created_at)}</td><td>${esc(p.client_name)}</td><td>${p.method === 'return' ? '<span class="tag grey">возврат товара</span>' : PAY[p.method] || p.method}</td><td class="r good"><b>${money(p.amount)}</b></td></tr>`).join('')}</tbody></table></div>${pager(data.total, DB.page, 50)}` : '<p class="empty">Погашений пока не было.</p>')
+    : data.items.length ? `<div class="tbl-wrap"><table><thead><tr>${w ? '<th></th>' : ''}<th>Клиент</th><th>Чек</th><th>Выдан</th><th>Вернуть до</th><th>Статус</th><th class="r">Сумма</th><th class="r">Остаток</th>${w ? '<th></th>' : ''}</tr></thead><tbody>
+      ${data.items.map(d => `<tr>${w ? `<td>${d.status !== 'paid' ? `<input type="checkbox" data-sel="${d.id}" ${DB.sel.has(d.id) ? 'checked' : ''} aria-label="Выбрать долг" style="width:20px;height:20px;accent-color:var(--blue)">` : ''}</td>` : ''}
+        <td><b>${esc(d.client_name)}</b><br><small class="muted">${esc(d.client_phone || '')}</small></td><td>${d.sale_number ? `№${d.sale_number}` : esc(d.note || '—')}</td><td>${fDateTime(d.created_at).slice(0, 8)}</td>
+        <td class="${d.status === 'overdue' ? 'bad' : ''}">${d.due_date ? fDay(d.due_date) + '.' + d.due_date.slice(2, 4) : '—'}</td><td>${debtTag(d.status)}</td><td class="r">${money(d.amount)}</td><td class="r"><b>${money(d.left)}</b></td>
+        ${w ? `<td class="r">${d.status !== 'paid' ? `<button class="btn sm" data-pay="${d.id}">Погасить</button>` : ''}</td>` : ''}</tr>`).join('')}</tbody></table></div>${pager(data.total, DB.page, 50)}`
+      : '<p class="empty">Долгов нет.</p>'}</div>`;
+  v.oninput = debounce(e => { if (e.target.id === 'dq') { DB.q = e.target.value; DB.page = 1; route(); } }, 350);
+  v.onchange = e => { const id = e.target.dataset.sel; if (id) { e.target.checked ? DB.sel.add(+id) : DB.sel.delete(+id); const b = $('[data-mass]', v); if (b) { b.disabled = !DB.sel.size; b.textContent = `Погасить выбранные${DB.sel.size ? ` (${DB.sel.size})` : ''}`; } } };
+  v.onclick = async e => {
+    const t = e.target.closest('[data-tab],[data-st],[data-page],[data-pay],[data-mass]'); if (!t) return;
+    if (t.dataset.tab) { DB.tab = t.dataset.tab; DB.page = 1; route(); }
+    else if (t.dataset.st) { DB.status = t.dataset.st; DB.page = 1; route(); }
+    else if (t.dataset.page) { DB.page = +t.dataset.page; route(); }
+    else if (t.dataset.pay) {
+      const d = data.items.find(x => x.id === +t.dataset.pay);
+      formModal(`Погасить долг: ${d.client_name}`, `<p class="sub" style="margin:0">${d.sale_number ? `Чек №${d.sale_number}, ` : ''}остаток ${money(d.left)}</p>
+        <div class="two">${field('Сумма', inp('amount', { type: 'number', step: '0.01', min: 0, value: d.left, req: true }))}${field('Способ', '<select class="input" name="method"><option value="cash">Наличные</option><option value="card">Карта</option></select>')}</div>`,
+      async (f, m) => {
+        await api(`/api/clients/${d.client_id}/debt-payments`, { method: 'POST', body: { amount: nOrNull(f.amount), method: f.method, debt_ids: [d.id], store_id: S.storeId } });
+        m.close(); toast(`Принято ${money(f.amount)}`); route();
+      }, { submit: 'Принять оплату' });
+    } else if ('mass' in t.dataset) {
+      const ids = [...DB.sel], picked = data.items.filter(x => DB.sel.has(x.id)), total = picked.reduce((a, x) => a + x.left, 0);
+      formModal('Массовое погашение', `<p class="sub" style="margin:0">${ids.length} ${plural(ids.length, 'долг', 'долга', 'долгов')} будут погашены полностью на сумму ${money(total)}.</p>
+        ${field('Способ оплаты', '<select class="input" name="method"><option value="cash">Наличные</option><option value="card">Карта</option></select>')}`,
+      async (f, m) => { const r = await api('/api/debts/pay', { method: 'POST', body: { debt_ids: ids, method: f.method } }); DB.sel.clear(); m.close(); toast(`Погашено ${money(r.paid)}`); route(); },
+      { submit: 'Погасить' });
+    }
+  };
+}
+
+// ================= ПОСТАВЩИКИ =================
+async function viewSuppliers(v) {
+  const sups = await api('/api/suppliers');
+  const totalDebt = sups.reduce((a, s) => a + Math.max(0, s.debt), 0);
+  v.innerHTML = `<div class="head"><div><h1>Поставщики</h1><p class="sub">${totalDebt ? `Мы должны поставщикам <b class="bad">${money(totalDebt)}</b>` : 'Долгов перед поставщиками нет'}</p></div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap"><button class="btn ghost" data-a="pay" ${sups.length ? '' : 'disabled'}>Добавить оплату</button><button class="btn ghost" data-a="return" ${sups.length ? '' : 'disabled'}>Возврат поставщику</button><button class="btn" data-a="new">Новый поставщик</button></div></div>
+  <div class="panel">${sups.length ? `<div class="tbl-wrap"><table><thead><tr><th>Поставщик</th><th>Телефон</th><th class="r">Сумма заказов</th><th class="r">Возвраты</th><th class="r">Оплачено</th><th class="r">Наш долг</th><th class="r">Товаров, шт</th></tr></thead><tbody>
+    ${sups.map(s => `<tr class="click" data-s="${s.id}" tabindex="0"><td><b>${esc(s.name)}</b></td><td>${esc(s.phone || '—')}</td><td class="r">${money(s.orders_total)}</td><td class="r">${s.returns_total ? money(s.returns_total) : '—'}</td>
+      <td class="r good">${money(s.paid_total)}</td><td class="r">${s.debt > 0 ? `<b class="bad">${money(s.debt)}</b>` : s.debt < 0 ? `<span class="good">переплата ${money(-s.debt)}</span>` : '—'}</td><td class="r">${num(s.items_count)}</td></tr>`).join('')}</tbody></table></div>`
+    : '<p class="empty">Поставщиков пока нет. Их можно добавить здесь или при приходе товара.</p>'}</div>`;
+  v.onkeydown = e => { const tr = e.target.closest('[data-s]'); if (tr && e.key === 'Enter') tr.click(); };
+  v.onclick = e => {
+    const t = e.target.closest('[data-s],[data-a]'); if (!t) return;
+    if (t.dataset.s) supplierCard(sups.find(s => s.id === +t.dataset.s), sups);
+    if (t.dataset.a === 'new') formModal('Новый поставщик', `${field('Название', inp('name', { req: true }))}${field('Телефон', inp('phone', { type: 'tel' }))}${field('Заметка', '<textarea class="input" name="note"></textarea>')}`,
+      async (d, m) => { await api('/api/suppliers', { method: 'POST', body: { name: d.name, phone: d.phone || null, note: d.note || null } }); m.close(); toast('Поставщик добавлен'); route(); }, { submit: 'Добавить' });
+    if (t.dataset.a === 'pay') supplierPayModal(sups, null);
+    if (t.dataset.a === 'return') supplierReturnModal(sups);
+  };
+}
+async function supplierPayModal(sups, sup) {
+  const orders = sup ? await api('/api/stock/supplier_order' + qs({ supplier_id: sup.id, status: 'completed' })) : [];
+  const unpaid = orders.filter(o => o.total > o.paid);
+  formModal('Оплата поставщику', `
+    ${field('Поставщик', `<select class="input" name="sid">${opts(sups, sup?.id)}</select>`)}
+    ${unpaid.length ? field('За заказ (необязательно)', `<select class="input" name="doc"><option value="">Без привязки к заказу</option>${unpaid.map(o => `<option value="${o.id}">Заказ №${o.id} от ${fDateTime(o.created_at).slice(0, 8)} — осталось ${num(o.total - o.paid)}</option>`).join('')}</select>`) : ''}
+    <div class="two">${field('Сумма', inp('amount', { type: 'number', step: '0.01', min: 0, req: true, value: sup && sup.debt > 0 ? sup.debt : '' }))}${field('Способ', '<select class="input" name="method"><option value="cash">Наличные</option><option value="card">Карта</option><option value="transfer">Перечисление</option></select>')}</div>
+    ${field('Комментарий', inp('note'))}`,
+  async (d, m) => {
+    await api(`/api/suppliers/${d.sid}/payments`, { method: 'POST', body: { amount: nOrNull(d.amount), method: d.method, document_id: nOrNull(d.doc), note: d.note || null } });
+    m.close(); toast(`Оплата ${money(d.amount)} записана`); route();
+  }, { submit: 'Записать оплату' });
+}
+async function supplierReturnModal(sups) {
+  const all = await api('/api/products' + qs({ status: 'active', size: 500, store_id: S.storeId }));
+  const goods = all.items.filter(p => !p.is_service && stockOf(p) > 0);
+  if (!goods.length) { toast('На складе нет товаров для возврата', true); return; }
+  const row = () => `<div class="two srow" style="grid-template-columns:minmax(0,3fr) minmax(0,1fr) minmax(0,1fr) auto;align-items:end">
+    ${field('Товар', `<select class="input" name="pid">${opts(goods.map(g => ({ ...g, name: `${g.name} (${num(stockOf(g))} шт)` })), '', 'id', 'name', 'Выберите товар')}</select>`)}${field('Кол-во', '<input class="input" name="qty" type="number" min="1" step="1">')}${field('Цена за шт.', '<input class="input" name="cost" type="number" min="0" step="0.01" placeholder="закупочная">')}<button type="button" class="x" data-del aria-label="Убрать строку">×</button></div>`;
+  const m = formModal('Возврат поставщику', `${field('Поставщик', `<select class="input" name="sid">${opts(sups)}</select>`)}
+    <div id="rows" style="display:grid;gap:10px">${row()}</div><button type="button" class="btn ghost sm" data-addrow style="justify-self:start">+ Ещё товар</button>
+    ${field('Причина', inp('reason', { ph: 'Например, брак партии' }))}
+    <p class="note" style="margin:0">Товар спишется со склада, а наш долг поставщику уменьшится на сумму возврата.</p>`,
+  async (d, mm, f) => {
+    const items = $$('.srow', f).map(r => ({ product_id: nOrNull($('[name=pid]', r).value), qty: nOrNull($('[name=qty]', r).value), price: nOrNull($('[name=cost]', r).value) })).filter(x => x.product_id && x.qty > 0);
+    if (!items.length) throw new Error('Добавьте хотя бы один товар с количеством');
+    const doc = await api('/api/stock/supplier_return', { method: 'POST', body: { store_id: S.storeId, supplier_id: +d.sid, reason: d.reason || null, items } });
+    await api(`/api/stock/supplier_return/${doc.id}/complete`, { method: 'POST' });
+    mm.close(); toast('Возврат поставщику проведён'); route();
+  }, { wide: true, submit: 'Провести возврат' });
+  m.el.addEventListener('click', e => {
+    if (e.target.closest('[data-addrow]')) $('#rows', m.el).insertAdjacentHTML('beforeend', row());
+    const del = e.target.closest('[data-del]'); if (del && $$('.srow', m.el).length > 1) del.closest('.srow').remove();
+  });
+}
+async function supplierCard(s, sups) {
+  const [orders, rets, pays] = await Promise.all([api('/api/stock/supplier_order' + qs({ supplier_id: s.id })), api('/api/stock/supplier_return' + qs({ supplier_id: s.id })), api(`/api/suppliers/${s.id}/payments`)]);
+  const PS = o => o.paid >= o.total && o.total > 0 ? '<span class="tag green">оплачен</span>' : o.paid > 0 ? '<span class="tag">частично</span>' : '<span class="tag amber">не оплачен</span>';
+  const m = modal(s.name, `<div class="kpis" style="margin-bottom:16px">
+      <div class="kpi" style="background:var(--bg)"><span>Заказов на</span><b>${money(s.orders_total)}</b></div>
+      <div class="kpi" style="background:var(--bg)"><span>Оплачено</span><b class="good">${money(s.paid_total)}</b></div>
+      <div class="kpi" style="background:var(--bg)"><span>Наш долг</span><b class="${s.debt > 0 ? 'bad' : ''}">${money(Math.max(0, s.debt))}</b></div></div>
+    <h2 style="font-size:16px">Заказы</h2>${orders.length ? `<div class="tbl-wrap"><table><thead><tr><th>№</th><th>Дата</th><th>Статус</th><th>Оплата</th><th class="r">Сумма</th><th class="r">Оплачено</th></tr></thead><tbody>${orders.map(o => `<tr><td>${o.id}</td><td>${fDateTime(o.created_at)}</td><td>${o.status === 'completed' ? '<span class="tag green">принят</span>' : o.status === 'draft' ? '<span class="tag grey">черновик</span>' : '<span class="tag grey">отменён</span>'}</td><td>${o.status === 'completed' ? PS(o) : ''}</td><td class="r">${money(o.total)}</td><td class="r">${num(o.paid)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">Заказов нет.</p>'}
+    ${rets.length ? `<h2 style="font-size:16px;margin-top:16px">Возвраты поставщику</h2><div class="tbl-wrap"><table><tbody>${rets.map(o => `<tr><td>№${o.id}</td><td>${fDateTime(o.created_at)}</td><td>${esc(o.reason || '')}</td><td class="r">${money(o.total)}</td></tr>`).join('')}</tbody></table></div>` : ''}
+    <h2 style="font-size:16px;margin-top:16px">Оплаты</h2>${pays.length ? `<div class="tbl-wrap"><table><tbody>${pays.map(p => `<tr><td>${fDateTime(p.created_at)}</td><td>${{ cash: 'Наличные', card: 'Карта', transfer: 'Перечисление' }[p.method]}${p.document_id ? ` · заказ №${p.document_id}` : ''}${p.note ? `<br><small class="muted">${esc(p.note)}</small>` : ''}</td><td class="r good">${money(p.amount)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">Оплат не было.</p>'}
+    <div class="modal-f"><button class="btn ghost" data-close>Закрыть</button><button class="btn" data-pay>Добавить оплату</button></div>`, { wide: true });
+  $('[data-pay]', m.el).onclick = () => { m.close(); supplierPayModal(sups, s); };
 }
 
 // ================= МАРКЕТИНГ =================
@@ -909,7 +1235,7 @@ async function viewSettings(v) {
     ${field('Название', inp('name', { value: company.name, req: true }))}
     <div class="two">${field('Валюта', inp('currency', { value: company.currency, req: true }))}${field('Часовой пояс (UTC+, часов)', inp('tz', { type: 'number', step: '0.5', value: company.utc_offset_minutes / 60 }))}</div>
     <div class="two">${field('Бонусы с покупки, %', inp('loyalty_percent', { type: 'number', min: 0, step: '0.1', value: company.loyalty_percent }))}${field('Оплата бонусами, до % чека', inp('max_bonus_payment_percent', { type: 'number', min: 0, max: 100, step: 1, value: company.max_bonus_payment_percent }))}</div>
-    ${field('Малый остаток — когда штук не больше', inp('low_stock_threshold', { type: 'number', min: 0, step: 1, value: company.low_stock_threshold }))}
+    <div class="two">${field('Малый остаток — когда штук не больше', inp('low_stock_threshold', { type: 'number', min: 0, step: 1, value: company.low_stock_threshold }))}${field('Срок долга по умолчанию, дней', inp('debt_days_default', { type: 'number', min: 0, step: 1, value: company.debt_days_default ?? 30 }))}</div>
     <label class="check"><input type="checkbox" name="allow_negative_stock" ${company.allow_negative_stock ? 'checked' : ''}> Разрешить продавать товар, которого нет на складе</label>
     <div class="err" hidden></div><button class="btn" type="submit" style="justify-self:start">Сохранить</button></form></section>
   <div class="grid" style="align-content:start">
@@ -922,7 +1248,7 @@ async function viewSettings(v) {
     e.preventDefault(); const f = e.target, d = Object.fromEntries(new FormData(f)), err = $('.err', f);
     try {
       S.company = await api('/api/company', { method: 'PATCH', body: { name: d.name, currency: d.currency.trim(), utc_offset_minutes: Math.round((nOrNull(d.tz) || 0) * 60),
-        loyalty_percent: nOrNull(d.loyalty_percent) || 0, max_bonus_payment_percent: nOrNull(d.max_bonus_payment_percent) || 0, low_stock_threshold: nOrNull(d.low_stock_threshold) || 0, allow_negative_stock: !!d.allow_negative_stock } });
+        loyalty_percent: nOrNull(d.loyalty_percent) || 0, max_bonus_payment_percent: nOrNull(d.max_bonus_payment_percent) || 0, low_stock_threshold: nOrNull(d.low_stock_threshold) || 0, allow_negative_stock: !!d.allow_negative_stock, debt_days_default: nOrNull(d.debt_days_default) ?? 30 } });
       err.hidden = true; toast('Настройки сохранены'); renderShell(); route();
     } catch (x) { err.textContent = x.message; err.hidden = false; }
   };

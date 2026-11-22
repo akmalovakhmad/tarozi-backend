@@ -1,14 +1,18 @@
 """Клиенты: база, группы и теги, бонусы, долги и их погашение."""
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.common import apply_patch, get_owned, get_store, money
 from app.db import get_db
-from app.models import Client, ClientGroup, DebtPayment, Sale, User
-from app.schemas import (ClientGroupIn, ClientGroupOut, ClientIn, ClientOut, ClientPatch, DebtPaymentIn,
+from app.models import Client, ClientDebt, ClientGroup, Company, DebtPayment, Sale, User, now
+from app.schemas import (ClientGroupIn, ClientGroupOut, ClientIn, ClientOut, ClientPatch, ClientStats, DebtPaymentIn,
                          DebtPaymentOut, Page, SaleOut)
 from app.security import require
+from app.services.sales import allocate_debt_payment
 
 router = APIRouter(prefix="/api", tags=["Клиенты"])
 
@@ -53,7 +57,48 @@ def list_clients(q: str | None = Query(None, description="Имя или теле
         rows = [c for c in rows if tag in (c.tags or [])]
     total = len(rows)
     rows = rows[(page - 1) * size: page * size]
-    return Page(total=total, items=[ClientOut.model_validate(c).model_dump(mode="json") for c in rows])
+    return Page(total=total, items=[o.model_dump(mode="json") for o in with_purchases(db, rows)])
+
+
+def with_purchases(db: Session, clients: list[Client]) -> list[ClientOut]:
+    """Добавляет сумму покупок (с учётом возвратов), число покупок и дату последней."""
+    ids = [c.id for c in clients]
+    agg = {}
+    if ids:
+        for cid, total, ret, cnt, last in db.execute(
+                select(Sale.client_id, func.coalesce(func.sum(Sale.total), 0), func.coalesce(func.sum(Sale.returned_total), 0),
+                       func.count(Sale.id), func.max(Sale.created_at))
+                .where(Sale.client_id.in_(ids), Sale.status == "completed").group_by(Sale.client_id)).all():
+            agg[cid] = (Decimal(total) - Decimal(ret), cnt, last)
+    out = []
+    for c in clients:
+        o = ClientOut.model_validate(c)
+        if c.id in agg:
+            o.purchases_total, o.purchases_count, o.last_purchase = agg[c.id]
+        out.append(o)
+    return out
+
+
+@router.get("/clients/stats", response_model=ClientStats)
+def clients_stats(user: User = Depends(require("clients.read")), db: Session = Depends(get_db)):
+    company = db.get(Company, user.company_id)
+    today = (now() + timedelta(minutes=company.utc_offset_minutes or 0)).date()
+    clients = db.scalars(select(Client).where(Client.company_id == user.company_id)).all()
+    last = dict(db.execute(select(Sale.client_id, func.max(Sale.created_at)).where(
+        Sale.company_id == user.company_id, Sale.status == "completed", Sale.client_id.isnot(None)).group_by(Sale.client_id)).all())
+    week_ago, cutoff = now() - timedelta(days=7), now() - timedelta(days=60)
+
+    def bday_soon(b: date | None) -> bool:
+        if not b:
+            return False
+        for d in range(8):
+            x = today + timedelta(days=d)
+            if (b.month, b.day) == (x.month, x.day):
+                return True
+        return False
+    return ClientStats(total=len(clients), new_week=sum(1 for c in clients if c.created_at >= week_ago),
+                       not_returning=sum(1 for c in clients if c.id in last and last[c.id] < cutoff),
+                       birthdays=sum(1 for c in clients if bday_soon(c.birth_date)))
 
 
 @router.get("/clients/debts/summary")
@@ -81,7 +126,7 @@ def create_client(data: ClientIn, user: User = Depends(require("clients.write"))
 
 @router.get("/clients/{client_id}", response_model=ClientOut)
 def get_client(client_id: int, user: User = Depends(require("clients.read")), db: Session = Depends(get_db)):
-    return get_owned(db, Client, client_id, user, "Клиент")
+    return with_purchases(db, [get_owned(db, Client, client_id, user, "Клиент")])[0]
 
 
 @router.patch("/clients/{client_id}", response_model=ClientOut)
@@ -113,6 +158,7 @@ def pay_debt(client_id: int, data: DebtPaymentIn, user: User = Depends(require("
     if amount > c.debt_balance:
         raise HTTPException(422, f"Долг клиента {c.debt_balance}, нельзя принять больше")
     c.debt_balance = c.debt_balance - amount
+    allocate_debt_payment(db, c, amount, debt_ids=data.debt_ids)
     p = DebtPayment(company_id=user.company_id, client_id=c.id, store_id=data.store_id, amount=amount,
                     method=data.method, user_id=user.id)
     db.add(p)
@@ -124,3 +170,28 @@ def pay_debt(client_id: int, data: DebtPaymentIn, user: User = Depends(require("
 def debt_payments(client_id: int, user: User = Depends(require("clients.read")), db: Session = Depends(get_db)):
     get_owned(db, Client, client_id, user, "Клиент")
     return db.scalars(select(DebtPayment).where(DebtPayment.client_id == client_id).order_by(DebtPayment.id.desc())).all()
+
+
+@router.get("/clients/{client_id}/statement")
+def statement(client_id: int, date_from: date | None = None, date_to: date | None = None,
+              user: User = Depends(require("clients.read")), db: Session = Depends(get_db)):
+    """Акт сверки: долг на начало, все долги и оплаты за период, долг на конец."""
+    c = get_owned(db, Client, client_id, user, "Клиент")
+    company = db.get(Company, user.company_id)
+    off = timedelta(minutes=company.utc_offset_minutes or 0)
+    start = datetime.combine(date_from, time.min) - off if date_from else datetime(2000, 1, 1)
+    end = datetime.combine(date_to + timedelta(days=1), time.min) - off if date_to else now() + timedelta(days=1)
+    debts = db.scalars(select(ClientDebt).where(ClientDebt.client_id == c.id)).all()
+    pays = db.scalars(select(DebtPayment).where(DebtPayment.client_id == c.id)).all()
+    numbers = dict(db.execute(select(Sale.id, Sale.number).where(Sale.id.in_([d.sale_id for d in debts if d.sale_id]))).all()) if debts else {}
+    opening = sum((Decimal(d.amount) for d in debts if d.created_at < start), Decimal(0)) - \
+        sum((Decimal(p.amount) for p in pays if p.created_at < start), Decimal(0))
+    rows = [{"date": d.created_at, "kind": "debt", "title": f"Продажа №{numbers[d.sale_id]} в долг" if d.sale_id in numbers else (d.note or "Долг"),
+             "debit": float(d.amount), "credit": 0} for d in debts if start <= d.created_at < end]
+    names = {"cash": "наличными", "card": "картой", "return": "возвратом товара"}
+    rows += [{"date": p.created_at, "kind": "payment", "title": f"Оплата {names.get(p.method, p.method)}", "debit": 0, "credit": float(p.amount)}
+             for p in pays if start <= p.created_at < end]
+    rows.sort(key=lambda r: r["date"])
+    debit, credit = sum(r["debit"] for r in rows), sum(r["credit"] for r in rows)
+    return {"client": {"id": c.id, "name": c.name, "phone": c.phone}, "opening": float(opening), "rows": rows,
+            "debit": debit, "credit": credit, "closing": float(opening) + debit - credit}

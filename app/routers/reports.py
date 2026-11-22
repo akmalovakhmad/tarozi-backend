@@ -98,13 +98,13 @@ def dashboard(store_id: int | None = None, date_from: date | None = None, date_t
 
     payments = defaultdict(lambda: ZERO)
     goods = services = ZERO
-    days = {d: {"date": d, "net": ZERO, "cash": ZERO, "card": ZERO, "debt": ZERO, "bonus": ZERO} for d in period.days()}
+    days = {d: {"date": d, "net": ZERO, "cash": ZERO, "card": ZERO, "debt": ZERO, "bonus": ZERO, "exchange": ZERO} for d in period.days()}
     for s in sales:
         day = days[period.local_day(s.created_at)]
         day["net"] += Decimal(s.total)
         for p in s.payments:
             payments[p.method] += Decimal(p.amount)
-            day[p.method] += Decimal(p.amount)
+            day[p.method] = day.get(p.method, ZERO) + Decimal(p.amount)
         for it in s.items:
             if it.is_service:
                 services += Decimal(it.qty)
@@ -129,9 +129,13 @@ def dashboard(store_id: int | None = None, date_from: date | None = None, date_t
         "period": {"from": period.date_from, "to": period.date_to},
         "currency": company.currency,
         "revenue": {"gross": _f(gross), "returns": _f(ret_sum), "net": _f(gross - ret_sum)},
-        "payments": {m: _f(payments[m]) for m in ("cash", "card", "debt", "bonus")},
+        "payments": {m: _f(payments[m]) for m in ("cash", "card", "debt", "bonus", "exchange")},
         "transactions": {"count": len(sales), "goods_qty": float(goods), "services_qty": float(services),
-                         "returns_count": len(returns),
+                         "returns_count": sum(1 for r in returns if not r.refund_method.startswith("exchange")),
+                         "returns_amount": _f(sum((Decimal(r.amount) for r in returns if not r.refund_method.startswith("exchange")), ZERO)),
+                         "exchanges_count": sum(1 for r in returns if r.refund_method.startswith("exchange")),
+                         "exchanges_amount": _f(sum((Decimal(r.amount) for r in returns if r.refund_method.startswith("exchange")), ZERO)),
+                         "debt_given": _f(payments["debt"]),
                          "average_check": _f(gross / len(sales)) if sales else 0},
         "by_day": [{k: (_f(v) if isinstance(v, Decimal) else v) for k, v in d.items()} for d in days.values()],
         "top_sellers": sorted(({"seller_id": k, "name": names.get(k, "—"), "net": _f(v)} for k, v in sellers.items()),

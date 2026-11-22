@@ -12,9 +12,9 @@ router = APIRouter(prefix="/api/auth", tags=["Вход и регистрация
 
 DEFAULT_ROLES = {
     "Кассир": ["products.read", "sales.create", "clients.read", "clients.write"],
-    "Старший продавец": ["products.read", "sales.create", "sales.read", "sales.return", "clients.read",
+    "Старший продавец": ["products.read", "sales.create", "sales.read", "sales.return", "sales.discount", "clients.read",
                          "clients.write", "reports.read"],
-    "Менеджер": ["products.read", "products.write", "stock.manage", "sales.create", "sales.read", "sales.return",
+    "Менеджер": ["products.read", "products.write", "stock.manage", "sales.create", "sales.read", "sales.return", "sales.discount",
                  "clients.read", "clients.write", "marketing.manage", "reports.read"],
 }
 
