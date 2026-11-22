@@ -45,7 +45,12 @@ def _http(method: str, path: str, token: str | None = None, body: dict | None = 
             raise HTTPException(422, "BILLZ не принял ключ. Проверьте, что скопировали его целиком, и что он не отозван")
         if e.code == 403:
             raise HTTPException(422, f"У ключа BILLZ нет прав на чтение {path}. Дайте ключу доступ на чтение в BILLZ: Настройки → Интеграции")
-        raise HTTPException(502, f"BILLZ ответил ошибкой {e.code} на {path}")
+        try:
+            why = json.loads(e.read().decode() or "{}")
+            why = why.get("message") or why.get("error") or (why.get("data") or {}).get("message") if isinstance(why, dict) else ""
+        except Exception:
+            why = ""
+        raise HTTPException(502, f"BILLZ ответил ошибкой {e.code} на {path}" + (f": {str(why)[:200]}" if why else ""))
     except urllib.error.URLError:
         raise HTTPException(502, "Не удалось связаться с BILLZ. Попробуйте ещё раз через минуту")
 
@@ -70,12 +75,12 @@ def _items(r: dict, key: str) -> tuple[list, int]:
     return items or [], int(r.get("count") or 0)
 
 
-def _pages(token: str, path: str, key: str, params: dict | None = None) -> list[dict]:
+def _pages(token: str, path: str, key: str, params: dict | None = None, limit: int = PAGE) -> list[dict]:
     out, page = [], 1
     while True:
-        items, total = _items(fetch("GET", path, token, params={**(params or {}), "page": page, "limit": PAGE}), key)
+        items, total = _items(fetch("GET", path, token, params={**(params or {}), "page": page, "limit": limit}), key)
         out += items
-        if not items or (total and len(out) >= total) or len(items) < PAGE or page >= 400:
+        if not items or (total and len(out) >= total) or len(items) < limit or page >= 2000:
             return out
         page += 1
 
@@ -321,13 +326,22 @@ def step_people(db: Session, company: Company, token: str, rep: dict) -> None:
     db.flush()
 
 
-def _safe_pages(token, path, key, params, rep) -> list[dict]:
-    """Вспомогательные отчёты: если BILLZ их не отдаёт, работаем дальше по карточкам чеков."""
-    try:
-        return _pages(token, path, key, params)
-    except HTTPException as e:
-        rep.setdefault("warnings", []).append(f"{path}: {e.detail}")
-        return []
+def _safe_pages(token, path, key, params, rep, shop_ids: list[str] | None = None) -> list[dict]:
+    """Вспомогательные отчёты. На 400 пробуем другие варианты запроса (меньше страница, явный список магазинов);
+    если BILLZ так и не отдаёт отчёт — работаем дальше по карточкам чеков, это медленнее, но данные те же."""
+    tries = [(params, PAGE), (params, 100)]
+    if shop_ids:
+        tries += [({**params, "shop_ids": ",".join(shop_ids)}, 100), ({**params, "shop_ids": ",".join(shop_ids)}, 10)]
+    last = None
+    for prm, lim in tries:
+        try:
+            return _pages(token, path, key, prm, lim)
+        except HTTPException as e:
+            last = e
+            if "400" not in str(e.detail):
+                break
+    rep.setdefault("warnings", []).append(f"отчёт {path} недоступен ({last.detail}); оплаты и товары взяты из карточек чеков")
+    return []
 
 
 def _order_search(token: str, rng: dict, rep: dict) -> list[dict]:
@@ -395,9 +409,10 @@ def step_sales(db: Session, company: Company, token: str, rep: dict, month: str,
     if not todo:
         return
     lines: dict[str, list] = {}
-    for ln in _safe_pages(token, "/v1/customer-purchases-table", "purchases", {**rng, "with_customers": "false"}, rep):
+    shop_ids = list(stores.keys())
+    for ln in _safe_pages(token, "/v1/customer-purchases-table", "purchases", {**rng, "with_customers": "false"}, rep, shop_ids):
         lines.setdefault(ln.get("order_id"), []).append(ln)
-    trx = {r.get("order_id"): r for r in _safe_pages(token, "/v1/transaction-report-table", "rows", rng, rep)}
+    trx = {r.get("order_id"): r for r in _safe_pages(token, "/v1/transaction-report-table", "rows", rng, rep, shop_ids)}
 
     def product_for(pid, name, sku=None, bar=None, unit=None) -> Product:
         p = p_ext.get(pid) or (p_sku.get(sku) if sku else None) or (p_bar.get(bar) if bar else None)

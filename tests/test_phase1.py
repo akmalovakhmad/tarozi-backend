@@ -227,3 +227,19 @@ def test_billz_import(client, monkeypatch):
     assert s["items"][0]["returned_qty"] == 1
     d2 = client.post("/api/import/billz", json={"secret_token": tok, "step": "debts"}, headers=h).json()
     assert d2["debts_created"] == 0 and d2["debts_updated"] == 1
+
+
+def test_billz_report_400_fallback(monkeypatch):
+    from fastapi import HTTPException
+    from app.services import billz_import
+    seen = []
+
+    def fake(method, path, token=None, body=None, params=None):
+        seen.append(dict(params))
+        if "shop_ids" not in params:
+            raise HTTPException(502, f"BILLZ ответил ошибкой 400 на {path}")
+        return {"count": 1, "rows": [{"order_id": "o1"}]}
+    monkeypatch.setattr(billz_import, "fetch", fake)
+    rep = {}
+    rows = billz_import._safe_pages("t", "/v1/transaction-report-table", "rows", {"start_date": "2026-10-01"}, rep, ["s1", "s2"])
+    assert rows == [{"order_id": "o1"}] and "warnings" not in rep and seen[-1]["shop_ids"] == "s1,s2"
