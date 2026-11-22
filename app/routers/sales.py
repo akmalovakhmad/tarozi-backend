@@ -96,10 +96,11 @@ def list_sales(store_id: int | None = None, seller_id: int | None = None, client
                      (Sale.status, status), (Sale.number, number)):
         if val is not None:
             q = q.where(col == val)
+    offset = timedelta(minutes=db.get(Company, user.company_id).utc_offset_minutes or 0)  # даты — по местному времени
     if date_from:
-        q = q.where(Sale.created_at >= datetime.combine(date_from, time.min))
+        q = q.where(Sale.created_at >= datetime.combine(date_from, time.min) - offset)
     if date_to:
-        q = q.where(Sale.created_at < datetime.combine(date_to + timedelta(days=1), time.min))
+        q = q.where(Sale.created_at < datetime.combine(date_to + timedelta(days=1), time.min) - offset)
     total = db.scalar(select(func.count()).select_from(q.subquery()))
     rows = db.scalars(q.order_by(Sale.id.desc()).offset((page - 1) * size).limit(size)).all()
     return Page(total=total, items=[SaleOut.model_validate(s).model_dump(mode="json") for s in rows])

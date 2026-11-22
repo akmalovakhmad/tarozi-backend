@@ -1,7 +1,10 @@
 import logging
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
 from app import models  # noqa: F401  — регистрирует таблицы
@@ -26,9 +29,13 @@ for r in (auth, settings_router, staff, products, stock, sales, clients, marketi
     app.include_router(r.router)
 
 
+WEB = Path(__file__).resolve().parent.parent / "public"
+
+
 @app.get("/", include_in_schema=False)
 def root():
-    return {"name": "Тарози API", "docs": "/docs"}
+    """Сайт (одностраничное приложение). API — по адресам /api/..., документация — /docs."""
+    return FileResponse(WEB / "index.html")
 
 
 @app.get("/api/health", tags=["Служебное"])
@@ -41,3 +48,8 @@ def health():
     except Exception:
         db_ok = False
     return {"status": "ok" if db_ok else "db_error", "database": engine.dialect.name, "database_ok": db_ok}
+
+
+# Статика сайта (app.js, app.css). На Vercel папку public/ раздаёт CDN, локально — этот mount.
+if WEB.is_dir():
+    app.mount("/", StaticFiles(directory=WEB), name="web")
