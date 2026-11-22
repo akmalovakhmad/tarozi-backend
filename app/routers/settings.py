@@ -1,5 +1,6 @@
 """Настройки: компания, магазины, цели по выручке."""
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -69,3 +70,16 @@ def create_target(data: TargetIn, user: User = Depends(require("settings.manage"
 def delete_target(target_id: int, user: User = Depends(require("settings.manage")), db: Session = Depends(get_db)):
     db.delete(get_owned(db, Target, target_id, user, "Цель"))
     db.commit()
+
+
+class BillzImportIn(BaseModel):
+    secret_token: str = Field(min_length=20, max_length=2000)
+    import_clients: bool = True
+
+
+@router.post("/import/billz")
+def import_billz(data: BillzImportIn, user: User = Depends(require("settings.manage", "products.write")),
+                 db: Session = Depends(get_db)):
+    """Перенос магазинов, категорий, товаров (цены, остатки) и клиентов из BILLZ. Ключ не сохраняется."""
+    from app.services import billz_import
+    return billz_import.run(db, user.company_id, data.secret_token, data.import_clients)

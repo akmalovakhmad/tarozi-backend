@@ -128,3 +128,41 @@ def test_supplier_debt_payments_and_returns(client):
     orders = c.get(f"/api/stock/supplier_order?supplier_id={sup}", headers=h).json()
     assert orders[0]["paid"] == 50
     assert c.get(f"/api/products/{b}", headers=h).json()["stock_total"] == 6
+
+
+def test_billz_import(client, monkeypatch):
+    from app.services import billz_import
+    calls = []
+
+    def fake(method, path, token=None, body=None, params=None):
+        calls.append(path)
+        if path == "/v1/auth/login":
+            return {"code": 200, "data": {"access_token": "t"}} if body["secret_token"] == "good-token-1234567890" else {"code": 401}
+        if path == "/v1/shop":
+            return {"count": 1, "shops": [{"id": "s1", "name": "Store Blitz", "address": "Ташкент"}]}
+        if path == "/v2/category":
+            return {"count": 1, "categories": [{"id": "c1", "name": "Укладка", "parent_id": "", "subRows": [{"id": "c2", "name": "Помады", "parent_id": "c1", "subRows": []}]}]}
+        if path == "/v2/products":
+            return {"count": 2, "products": [
+                {"id": "p1", "name": "Pomade Red", "sku": "M008", "barcode": "5012", "is_variative": False, "categories": [{"id": "c2"}],
+                 "measurement_unit": {"short_name": "шт"}, "shop_prices": [{"shop_id": "s1", "retail_price": 100, "supply_price": 36}],
+                 "shop_measurement_values": [{"shop_id": "s1", "active_measurement_value": 7}]},
+                {"id": "p0", "name": "Parent", "is_variative": True}]}
+        if path == "/v1/client":
+            return {"count": 1, "clients": [{"first_name": "Азиз", "last_name": "Каримов", "phone_numbers": ["998901112233"], "gender": "male", "birth_date": "1990-05-14"}]}
+        return {}
+    monkeypatch.setattr(billz_import, "fetch", fake)
+    h = register(client)
+    bad = client.post("/api/import/billz", json={"secret_token": "wrong-token-1234567890"}, headers=h)
+    assert bad.status_code == 422
+    r = client.post("/api/import/billz", json={"secret_token": "good-token-1234567890"}, headers=h)
+    assert r.status_code == 200, r.text
+    rep = r.json()
+    assert rep["stores_created"] == 1 and rep["categories_created"] == 2 and rep["products_created"] == 1 and rep["clients_created"] == 1
+    p = client.get("/api/products?q=M008", headers=h).json()["items"][0]
+    assert p["retail_price"] == 100 and p["cost_price"] == 36 and p["stock_total"] == 7
+    c = client.get("/api/clients?q=Азиз", headers=h).json()["items"][0]
+    assert c["phone"] == "+998901112233" and c["gender"] == "m" and c["birth_date"] == "1990-05-14"
+    # повторный импорт ничего не дублирует
+    rep2 = client.post("/api/import/billz", json={"secret_token": "good-token-1234567890"}, headers=h).json()
+    assert rep2["products_created"] == 0 and rep2["products_updated"] == 1 and rep2["clients_created"] == 0 and rep2["stock_lines"] == 0

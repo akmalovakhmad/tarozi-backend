@@ -1525,6 +1525,8 @@ async function viewSettings(v) {
   <div class="grid" style="align-content:start">
   <section class="panel"><div class="head" style="margin-bottom:8px"><h2>Магазины</h2><button class="btn ghost sm" data-a="store">Добавить магазин</button></div>
     <div class="tbl-wrap"><table><tbody>${stores.map(s => `<tr class="click" data-s="${s.id}" tabindex="0"><td><b>${esc(s.name)}</b><br><small class="muted">${esc(s.address || 'адрес не указан')}</small></td><td class="r"><span class="tag ${s.is_active ? 'green' : 'grey'}">${s.is_active ? 'работает' : 'закрыт'}</span></td></tr>`).join('')}</tbody></table></div></section>
+  <section class="panel"><div class="head" style="margin-bottom:8px"><h2>Перенос из BILLZ</h2><button class="btn ghost sm" data-a="billz">Перенести данные</button></div>
+    <p class="muted" style="margin:0">Магазины, категории, товары с ценами и остатками, клиенты. Повторный перенос обновляет данные, а не дублирует их.</p></section>
   <section class="panel"><div class="head" style="margin-bottom:8px"><h2>Цели по выручке</h2><button class="btn ghost sm" data-a="target">Новая цель</button></div>
     ${targets.length ? `<div class="tbl-wrap"><table><tbody>${targets.map(t => `<tr><td>${fDay(t.period_start)} — ${fDay(t.period_end)}<br><small class="muted">${esc(t.store_id ? sn[t.store_id] : 'Все магазины')}</small></td><td class="r"><b>${money(t.amount)}</b></td><td class="r"><button class="btn link sm" data-deltarget="${t.id}">Удалить</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">Целей пока нет.</p>'}</section>
   </div></div>`;
@@ -1542,11 +1544,31 @@ async function viewSettings(v) {
     await api(s ? `/api/stores/${s.id}` : '/api/stores', { method: s ? 'PUT' : 'POST', body: { name: d.name, address: d.address || null, is_active: !!d.is_active } });
     S.stores = (await api('/api/stores')).filter(x => x.is_active); m.close(); toast('Магазин сохранён'); renderShell(); route();
   });
+  const billzModal = () => formModal('Перенос из BILLZ', `<p class="muted" style="margin:0">Ключ берётся в BILLZ: Настройки → Интеграции → API (secret token). Он используется один раз и не сохраняется.</p>
+    ${field('Ключ API из BILLZ', '<input class="input" name="secret_token" type="password" autocomplete="off" required minlength="20">')}
+    <label class="check"><input type="checkbox" name="import_clients" checked> Перенести и клиентов</label>
+    <p class="muted" style="margin:0">Обычно занимает до минуты. Продажи и долги из BILLZ не переносятся.</p>`,
+  async (d, m) => {
+    const btn = $('button[type=submit]', m.el); btn.textContent = 'Переношу…';
+    try {
+      const r = await api('/api/import/billz', { method: 'POST', body: { secret_token: d.secret_token.trim(), import_clients: !!d.import_clients } });
+      m.close();
+      modal('Данные перенесены', `<div class="blist">
+        <p>Товаров: новых <b>${r.products_created}</b>, обновлено <b>${r.products_updated}</b></p>
+        <p>Строк остатков выставлено: <b>${r.stock_lines}</b></p>
+        <p>Клиентов: новых <b>${r.clients_created}</b>, обновлено <b>${r.clients_updated}</b></p>
+        <p>Магазинов создано: <b>${r.stores_created}</b>, категорий: <b>${r.categories_created}</b></p>
+        ${r.skipped.length ? `<p class="muted">Пропущено: ${r.skipped.length}</p>` : ''}
+        <p class="muted">${r.notes.map(esc).join('<br>')}</p></div>`);
+      S.stores = (await api('/api/stores')).filter(x => x.is_active); renderShell(); route();
+    } finally { btn.textContent = 'Перенести'; }
+  }, { submit: 'Перенести' });
   v.onclick = async e => {
     const t = e.target.closest('[data-a],[data-s],[data-deltarget]'); if (!t) return;
     if (t.dataset.a === 'store') storeModal(null);
     if (t.dataset.s) storeModal(stores.find(s => s.id === +t.dataset.s));
     if (t.dataset.a === 'target') targetModal();
+    if (t.dataset.a === 'billz') billzModal();
     if (t.dataset.deltarget) { await api(`/api/targets/${t.dataset.deltarget}`, { method: 'DELETE' }); toast('Цель удалена'); route(); }
   };
 }
