@@ -25,6 +25,30 @@ with SessionLocal() as _db:
     debts.sync_legacy_debts(_db)
 
 
+def _password_reset_from_env() -> None:
+    """Аварийный сброс пароля: переменная PASSWORD_RESET = «логин:готовый_хэш». После входа переменную удаляют."""
+    import os
+    from sqlalchemy import func, select
+    raw = os.environ.get("PASSWORD_RESET", "").strip()
+    if ":" not in raw:
+        return
+    login, pw_hash = raw.split(":", 1)
+    log = logging.getLogger("uvicorn.error")
+    with SessionLocal() as db:
+        users = db.scalars(select(models.User).where(func.lower(models.User.login) == login.strip().lower())).all()
+        if len(users) != 1:
+            log.warning("PASSWORD_RESET: пользователей с логином %s найдено %d", login, len(users))
+            return
+        u = users[0]
+        if u.password_hash != pw_hash:
+            u.password_hash, u.is_active = pw_hash, True
+            db.commit()
+            log.warning("PASSWORD_RESET: пароль для %s сброшен", u.login)
+
+
+_password_reset_from_env()
+
+
 app = FastAPI(title="Тарози API", version="0.1.0",
               description="Бэкенд системы учёта для магазина: товары и склад, касса, клиенты, маркетинг, отчёты.")
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=False,
