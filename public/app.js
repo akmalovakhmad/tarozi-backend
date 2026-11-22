@@ -1552,11 +1552,18 @@ async function viewSettings(v) {
     const btn = $('button[type=submit]', m.el), log = $('#bzLog', m.el), key = d.secret_token.trim();
     const tot = {}; log.hidden = false; log.innerHTML = '';
     const line = t => { const p = document.createElement('p'); p.textContent = t; log.append(p); return p; };
-    const add = r => { for (const [k, v] of Object.entries(r)) if (typeof v === 'number' && k !== 'month_transactions') tot[k] = (tot[k] || 0) + v; (r.notes || []).forEach(n => (tot.notes ||= new Set()).add(n)); };
-    const call = (step, month) => api('/api/import/billz', { method: 'POST', body: { secret_token: key, step, month } });
+    const add = r => { for (const [k, v] of Object.entries(r)) if (typeof v === 'number' && !['month_transactions', 'billz_products', 'next_page'].includes(k)) tot[k] = (tot[k] || 0) + v; (r.notes || []).forEach(n => (tot.notes ||= new Set()).add(n)); };
+    const call = (step, month, page) => api('/api/import/billz', { method: 'POST', body: { secret_token: key, step, month, page } });
     btn.textContent = 'Переношу…';
     try {
-      for (const [step, label] of [['catalog', 'Товары, остатки, магазины'], ['staff', 'Сотрудники'], ['people', 'Клиенты и поставщики']]) {
+      const pc = line('Товары…'); let page = 1, r;
+      do {
+        r = await call('catalog', null, page); add(r);
+        pc.textContent = `Товары: ${Math.min(page * 100, r.billz_products || page * 100)} из ${r.billz_products || '…'}`;
+        page = r.next_page;
+      } while (page);
+      pc.textContent = `Товары — готово (${r.billz_products || 0} в BILLZ)`;
+      for (const [step, label] of [['staff', 'Сотрудники'], ['people', 'Клиенты и поставщики']]) {
         const p = line(label + '…'); add(await call(step)); p.textContent = label + ' — готово';
       }
       const ps = line('Ищу, с какого месяца начинается история продаж…'); let empty = 0, sales = 0, months = [];

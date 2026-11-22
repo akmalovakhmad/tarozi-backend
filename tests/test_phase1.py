@@ -243,3 +243,42 @@ def test_billz_report_400_fallback(monkeypatch):
     rep = {}
     rows = billz_import._safe_pages("t", "/v1/transaction-report-table", "rows", {"start_date": "2026-10-01"}, rep, ["s1", "s2"])
     assert rows == [{"order_id": "o1"}] and "warnings" not in rep and seen[-1]["shop_ids"] == "s1,s2"
+
+
+def test_billz_pages_when_limit_is_capped(monkeypatch):
+    from app.services import billz_import
+    data = [{"id": i} for i in range(250)]
+
+    def fake(method, path, token=None, body=None, params=None):
+        lim = min(params["limit"], 100)  # BILLZ молча урезает limit
+        st = (params["page"] - 1) * lim
+        return {"count": len(data), "products": data[st:st + lim]}
+    monkeypatch.setattr(billz_import, "fetch", fake)
+    assert len(billz_import._pages("t", "/v2/products", "products")) == 250
+
+
+def test_billz_catalog_pages(client, monkeypatch):
+    from app.services import billz_import
+    data = [{"id": f"p{i}", "name": f"Товар {i}", "sku": f"S{i}", "supply_price": 10,
+             "shop_prices": [{"shop_id": "s1", "retail_price": 20}],
+             "shop_measurement_values": [{"shop_id": "s1", "active_measurement_value": 3}]} for i in range(150)]
+
+    def fake(method, path, token=None, body=None, params=None):
+        if path == "/v1/auth/login":
+            return {"data": {"access_token": "t"}}
+        if path == "/v1/shop":
+            return {"count": 1, "shops": [{"id": "s1", "name": "Склад"}]}
+        if path == "/v2/category":
+            return {"count": 0, "categories": []}
+        if path == "/v2/products":
+            st = (params["page"] - 1) * 100
+            return {"count": 150, "products": data[st:st + 100]}
+        return {}
+    monkeypatch.setattr(billz_import, "fetch", fake)
+    h = register(client)
+    r1 = client.post("/api/import/billz", json={"secret_token": "good-token-1234567890", "step": "catalog", "page": 1}, headers=h).json()
+    assert r1["next_page"] == 2 and r1["products_created"] == 100
+    r2 = client.post("/api/import/billz", json={"secret_token": "good-token-1234567890", "step": "catalog", "page": 2}, headers=h).json()
+    assert r2["next_page"] is None and r2["products_created"] == 50
+    p = client.get("/api/products?q=S149", headers=h).json()["items"][0]
+    assert p["retail_price"] == 20 and p["cost_price"] == 10 and p["stock_total"] == 3

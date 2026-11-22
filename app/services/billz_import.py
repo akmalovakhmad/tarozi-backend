@@ -24,7 +24,6 @@ from sqlalchemy.orm import Session
 from app.models import (Category, Client, ClientDebt, Company, Payment, Product, Sale, SaleItem, SaleReturn, Store,
                         Supplier, User)
 from app.security import hash_password
-from app.services.stock import change_stock, get_level
 
 HOST = "https://api-admin.billz.ai"
 PAGE = 500
@@ -76,11 +75,19 @@ def _items(r: dict, key: str) -> tuple[list, int]:
 
 
 def _pages(token: str, path: str, key: str, params: dict | None = None, limit: int = PAGE) -> list[dict]:
-    out, page = [], 1
+    """Все страницы списка. BILLZ может молча урезать limit (например, до 100), поэтому листаем,
+    пока не наберём count, а не пока страница «полная»."""
+    out, page, prev_first = [], 1, None
     while True:
         items, total = _items(fetch("GET", path, token, params={**(params or {}), "page": page, "limit": limit}), key)
+        if not items:
+            return out
+        first = json.dumps(items[0], sort_keys=True, default=str)[:500]
+        if first == prev_first:  # сервер отдал ту же страницу ещё раз — дальше листать бессмысленно
+            return out
+        prev_first = first
         out += items
-        if not items or (total and len(out) >= total) or len(items) < limit or page >= 2000:
+        if (total and len(out) >= total) or (not total and len(items) < min(limit, 100)) or page >= 5000:
             return out
         page += 1
 
@@ -164,9 +171,102 @@ def _flat_categories(rows: list[dict], parent: str | None = None) -> list[dict]:
 
 # ---------- шаги ----------
 
-def step_catalog(db: Session, company: Company, token: str, rep: dict) -> None:
+def step_catalog(db: Session, company: Company, token: str, rep: dict, page: int = 1) -> None:
+    """Каталог по страницам BILLZ (по 100 товаров за запрос), чтобы большой каталог укладывался в лимит времени.
+    На первой странице заодно переносятся магазины и категории."""
+    from app.models import StockLevel, StockMovement
     cid = company.id
-    shop_map = _shop_map(db, token, cid, rep)
+    if page <= 1:
+        _shop_map(db, token, cid, rep)
+        _categories(db, token, cid, rep)
+    shop_map = {s.external_id: s.id for s in db.scalars(select(Store).where(Store.company_id == cid, Store.external_id.isnot(None)))}
+    cat_map = {c.external_id: c.id for c in db.scalars(select(Category).where(Category.company_id == cid, Category.external_id.isnot(None)))}
+
+    lim = 100
+    r = fetch("GET", "/v2/products", token, params={"page": page, "limit": lim})
+    rows, total = _items(r, "products")
+    rep["billz_products"] = total
+    rep["next_page"] = page + 1 if rows and (page * lim < total if total else len(rows) >= lim) else None
+
+    prods = list(db.scalars(select(Product).where(Product.company_id == cid)))
+    by_ext = {p.external_id: p for p in prods if p.external_id}
+    by_sku = {p.sku: p for p in prods if p.sku}
+    by_bar = {p.barcode: p for p in prods if p.barcode}
+    todo = []
+    for bp in rows:
+        has_data = bp.get("shop_measurement_values") or any(_dec(x.get("retail_price")) for x in bp.get("shop_prices") or [])
+        if bp.get("is_variative") and not has_data and not bp.get("sku") and not bp.get("barcode"):
+            continue  # пустая карточка-родитель вариаций; сами вариации приходят отдельными товарами
+        name = (bp.get("name") or "").strip()
+        if not name:
+            rep["skipped"].append(f"товар без названия (id {bp.get('id')})")
+            continue
+        sku, bar = (bp.get("sku") or "").strip() or None, (bp.get("barcode") or "").strip() or None
+        p = by_ext.get(bp.get("id")) or (by_sku.get(sku) if sku else None) or (by_bar.get(bar) if bar else None)
+        prices = (bp.get("shop_prices") or []) + (bp.get("product_supplier_stock") or [])
+        top = lambda k: _dec(bp.get(k))
+        retail = max((_dec(x.get("retail_price")) for x in prices), default=Decimal(0)) or top("retail_price")
+        supply = top("supply_price") or max((_dec(x.get("supply_price")) or _dec(x.get("max_supply_price")) for x in prices), default=Decimal(0))
+        wholesale = max((_dec(x.get("wholesale_price")) for x in prices), default=Decimal(0)) or top("wholesale_price")
+        if p:
+            rep["products_updated"] += 1
+        else:
+            if sku and sku in by_sku:
+                sku = None
+            p = Product(company_id=cid, name=name[:300], sku=sku)
+            db.add(p)
+            rep["products_created"] += 1
+        p.external_id = bp.get("id")
+        p.is_active = True
+        p.name, p.barcode = name[:300], bar or p.barcode
+        p.unit = (((bp.get("measurement_unit") or {}).get("short_name")) or p.unit or "шт")[:20]
+        cat_ids = [c.get("id") for c in bp.get("categories") or []]
+        if cat_ids and cat_ids[-1] in cat_map:
+            p.category_id = cat_map[cat_ids[-1]]
+        if retail:
+            p.retail_price = retail
+        if supply:
+            p.cost_price = supply
+        if wholesale:
+            p.wholesale_price = wholesale
+        by_ext[p.external_id] = p
+        if p.sku:
+            by_sku[p.sku] = p
+        if bar:
+            by_bar[bar] = p
+        levels: dict[int, Decimal] = {}
+        for sv in bp.get("shop_measurement_values") or []:
+            sid = shop_map.get(sv.get("shop_id"))
+            if sid:
+                v = sv.get("active_measurement_value", sv.get("total_active_measurement_value"))
+                levels[sid] = levels.get(sid, Decimal(0)) + _dec(v)
+        if not levels:  # остатки только в разрезе поставщиков
+            for sv in bp.get("product_supplier_stock") or []:
+                sid = shop_map.get(sv.get("shop_id"))
+                if sid:
+                    levels[sid] = levels.get(sid, Decimal(0)) + _dec(sv.get("measurement_value"))
+        todo.append((p, levels))
+    db.flush()  # один раз на страницу: у новых товаров появятся id
+
+    ids = [p.id for p, _ in todo]
+    have = {(lv.product_id, lv.store_id): lv for lv in db.scalars(select(StockLevel).where(StockLevel.product_id.in_(ids)))} if ids else {}
+    for p, levels in todo:
+        if p.is_service:
+            continue
+        for sid, target in levels.items():
+            lv = have.get((p.id, sid))
+            if lv is None:
+                lv = StockLevel(product_id=p.id, store_id=sid, qty=Decimal(0))
+                db.add(lv)
+                have[(p.id, sid)] = lv
+            delta = target - Decimal(lv.qty or 0)
+            if delta:
+                lv.qty = target
+                db.add(StockMovement(company_id=cid, product_id=p.id, store_id=sid, delta=delta, reason="import", ref_id=None, user_id=None))
+                rep["stock_lines"] += 1
+
+
+def _categories(db: Session, token: str, cid: int, rep: dict) -> None:
     cats = {c.name.strip().lower(): c for c in db.scalars(select(Category).where(Category.company_id == cid))}
     cats_ext = {c.external_id: c for c in cats.values() if c.external_id}
     cat_map: dict[str, int] = {}
@@ -186,60 +286,6 @@ def step_catalog(db: Session, company: Company, token: str, rep: dict) -> None:
     for c in flat:
         if c["parent"] in cat_map and c["id"] in cat_map and cat_map[c["parent"]] != cat_map[c["id"]]:
             db.get(Category, cat_map[c["id"]]).parent_id = cat_map[c["parent"]]
-
-    prods = list(db.scalars(select(Product).where(Product.company_id == cid)))
-    by_ext = {p.external_id: p for p in prods if p.external_id}
-    by_sku = {p.sku: p for p in prods if p.sku}
-    by_bar = {p.barcode: p for p in prods if p.barcode}
-    for bp in _pages(token, "/v2/products", "products"):
-        if bp.get("is_variative"):
-            continue  # карточка-родитель вариаций; сами вариации приходят отдельными товарами
-        name = (bp.get("name") or "").strip()
-        if not name:
-            rep["skipped"].append(f"товар без названия (id {bp.get('id')})")
-            continue
-        sku, bar = (bp.get("sku") or "").strip() or None, (bp.get("barcode") or "").strip() or None
-        p = by_ext.get(bp.get("id")) or (by_sku.get(sku) if sku else None) or (by_bar.get(bar) if bar else None)
-        prices = bp.get("shop_prices") or []
-        retail = max((_dec(x.get("retail_price")) for x in prices), default=Decimal(0))
-        supply = max((_dec(x.get("supply_price")) for x in prices), default=Decimal(0))
-        wholesale = max((_dec(x.get("wholesale_price")) for x in prices), default=Decimal(0))
-        if p:
-            rep["products_updated"] += 1
-        else:
-            if sku and sku in by_sku:
-                sku = None
-            p = Product(company_id=cid, name=name[:300], sku=sku)
-            db.add(p)
-            rep["products_created"] += 1
-        p.external_id = bp.get("id")
-        p.name, p.barcode = name[:300], bar or p.barcode
-        p.unit = (((bp.get("measurement_unit") or {}).get("short_name")) or p.unit or "шт")[:20]
-        cat_ids = [c.get("id") for c in bp.get("categories") or []]
-        if cat_ids and cat_ids[-1] in cat_map:
-            p.category_id = cat_map[cat_ids[-1]]
-        if retail:
-            p.retail_price = retail
-        if supply:
-            p.cost_price = supply
-        if wholesale:
-            p.wholesale_price = wholesale
-        db.flush()
-        by_ext[p.external_id] = p
-        if p.sku:
-            by_sku[p.sku] = p
-        if bar:
-            by_bar[bar] = p
-        for sv in bp.get("shop_measurement_values") or []:
-            sid = shop_map.get(sv.get("shop_id"))
-            if not sid:
-                continue
-            target = _dec(sv.get("active_measurement_value"))
-            current = Decimal(get_level(db, p.id, sid).qty)
-            if target != current:
-                change_stock(db, company_id=cid, product=p, store_id=sid, delta=target - current, reason="import",
-                             ref_id=None, user_id=None, allow_negative=True)
-                rep["stock_lines"] += 1
 
 
 def step_staff(db: Session, company: Company, token: str, rep: dict) -> None:
@@ -573,7 +619,7 @@ def step_debts(db: Session, company: Company, token: str, rep: dict) -> None:
 
 
 def run(db: Session, company_id: int, secret_token: str, step: str = "all", month: str | None = None,
-        import_clients: bool = True) -> dict:
+        import_clients: bool = True, page: int = 1) -> dict:
     if step not in STEPS + ("all",):
         raise HTTPException(422, "Неизвестный шаг переноса")
     token = _login(secret_token)
@@ -590,6 +636,11 @@ def run(db: Session, company_id: int, secret_token: str, step: str = "all", mont
             r = r["data"] if isinstance(r.get("data"), dict) else r
             n = int(r.get("count") or 0) or sum(len(d.get("orders") or []) for d in r.get("orders_sorted_by_date_list") or [])
             rep["month"], rep["month_transactions"] = m.strftime("%Y-%m"), n
+        elif s == "catalog":
+            step_catalog(db, company, token, rep, page)
+            if step == "all":
+                while rep.get("next_page"):
+                    step_catalog(db, company, token, rep, rep["next_page"])
         elif s == "sales":
             step_sales(db, company, token, rep, month or date.today().strftime("%Y-%m"))
         else:

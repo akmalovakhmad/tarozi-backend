@@ -77,6 +77,7 @@ class BillzImportIn(BaseModel):
     import_clients: bool = True
     step: str = "all"  # catalog, staff, people, sales (с month=ГГГГ-ММ), debts или all
     month: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}$")
+    page: int = Field(default=1, ge=1)
 
 
 @router.post("/import/billz")
@@ -84,4 +85,4 @@ def import_billz(data: BillzImportIn, user: User = Depends(require("settings.man
                  db: Session = Depends(get_db)):
     """Перенос данных из BILLZ по шагам. Ключ не сохраняется."""
     from app.services import billz_import
-    return billz_import.run(db, user.company_id, data.secret_token, data.step, data.month, data.import_clients)
+    return billz_import.run(db, user.company_id, data.secret_token, data.step, data.month, data.import_clients, data.page)
