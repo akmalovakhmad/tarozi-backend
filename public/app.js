@@ -31,8 +31,8 @@ const opts = (list, sel, val = 'id', label = 'name', empty) =>
   (empty != null ? `<option value="">${esc(empty)}</option>` : '') +
   list.map(x => `<option value="${esc(x[val])}" ${String(x[val]) === String(sel ?? '') ? 'selected' : ''}>${esc(x[label])}</option>`).join('');
 const initials = n => (n || '?').split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase();
-const PALETTE = [['#DCE5FB', '#1E4BD2'], ['#D3F0EC', '#0F7A6E'], ['#FBE7D3', '#9A5A12'], ['#F6DDE1', '#B02A3E'], ['#E9E3FB', '#5B3FC4']];
-const tint = id => PALETTE[(+id || 0) % PALETTE.length];
+const PALETTE = ['#5B5BD6', '#18885A', '#B86E0C', '#CF3B47', '#7A4FD0', '#0E7FA8'];
+const tint = id => { const c = PALETTE[(+id || 0) % PALETTE.length]; return [`color-mix(in srgb, ${c} 14%, transparent)`, c]; };
 
 // ---------- состояние ----------
 const S = { token: store.get('tz_token'), me: null, company: null, stores: [], storeId: +store.get('tz_store') || null, cats: [] };
@@ -72,10 +72,13 @@ const qs = o => { const p = new URLSearchParams(); for (const [k, v] of Object.e
 
 // ---------- toast & modal ----------
 function toast(msg, bad) {
-  $('.toast')?.remove();
+  let box = $('.toasts');
+  if (!box) { box = document.createElement('div'); box.className = 'toasts'; box.setAttribute('role', 'status'); document.body.append(box); }
   const t = document.createElement('div');
-  t.className = 'toast' + (bad ? ' bad' : ''); t.setAttribute('role', 'status'); t.textContent = msg;
-  document.body.append(t); setTimeout(() => t.remove(), 3800);
+  t.className = 'toast' + (bad ? ' bad' : '');
+  t.innerHTML = (bad ? ICON.alert : ICON.check) + `<span>${esc(msg)}</span>`;
+  box.append(t); while (box.children.length > 3) box.firstChild.remove();
+  setTimeout(() => t.remove(), bad ? 6000 : 3500);
 }
 function modal(title, html, { wide } = {}) {
   const bg = document.createElement('div');
@@ -114,7 +117,26 @@ const inp = (name, { type = 'text', value = '', req, ph = '', step, min, attrs =
 const nOrNull = v => (v === '' || v == null ? null : +String(v).replace(',', '.'));
 
 // ---------- иконки ----------
-const I = p => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
+const I = p => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
+const ICON = {
+  search: I('<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>'),
+  plus: I('<path d="M12 5v14M5 12h14"/>'),
+  check: I('<path d="M5 12.5l4.5 4.5L19 7.5"/>'),
+  alert: I('<circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5M12 16.5v.01"/>'),
+  sun: I('<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>'),
+  moon: I('<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>'),
+  logout: I('<path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/>'),
+  user: I('<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-7 8-7s8 3 8 7"/>'),
+  tag: I('<path d="M3 12V4h8l10 10-8 8z"/><circle cx="7.5" cy="8.5" r="1.5"/>'),
+  percent: I('<path d="M19 5L5 19"/><circle cx="7" cy="7" r="2.5"/><circle cx="17" cy="17" r="2.5"/>'),
+  note: I('<path d="M5 4h14v16H5zM9 9h6M9 13h6M9 17h3"/>'),
+  box: I('<path d="M3 7l9-4 9 4-9 4zM3 7v10l9 4 9-4V7M12 11v10"/>'),
+  print: I('<path d="M7 9V3h10v6M7 17H4v-7h16v7h-3M7 14h10v7H7z"/>'),
+  swap: I('<path d="M7 4L3 8l4 4M3 8h14M17 20l4-4-4-4M21 16H7"/>'),
+  pause: I('<rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/>'),
+  arrow: I('<path d="M5 12h14M13 6l6 6-6 6"/>'),
+  menu: I('<path d="M4 7h16M4 12h16M4 17h16"/>'),
+};
 const ICONS = {
   dashboard: I('<path d="M3 12l9-8 9 8M5 10v10h14V10"/>'),
   kassa: I('<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M7 20h10M12 16v4M7 8h4"/>'),
@@ -128,7 +150,7 @@ const ICONS = {
   staff: I('<circle cx="12" cy="7" r="4"/><path d="M4 21c0-4 4-7 8-7s8 3 8 7"/>'),
   settings: I('<circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.6-2-3.4-2.4 1a7 7 0 0 0-2-1.2L14 3h-4l-.5 2.6a7 7 0 0 0-2 1.2l-2.4-1-2 3.4 2 1.6A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.6 2 3.4 2.4-1a7 7 0 0 0 2 1.2L10 21h4l.5-2.6a7 7 0 0 0 2-1.2l2.4 1 2-3.4-2-1.6c.1-.4.1-.8.1-1.2z"/>'),
 };
-const LOGO = `<svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true"><rect width="34" height="34" rx="9" fill="#1E4BD2"/><path d="M17 8v18M9 12h16M9 12l-3 7h6zM25 12l-3 7h6zM12 26h10" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+const LOGO = `<svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true"><rect width="34" height="34" rx="9" fill="#5B5BD6"/><path d="M17 8v18M9 12h16M9 12l-3 7h6zM25 12l-3 7h6zM12 26h10" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
 // ---------- маршруты ----------
 const ROUTES = {
@@ -159,61 +181,136 @@ async function boot() {
 }
 function logout() { S.token = null; S.me = null; store.set('tz_token', null); renderAuth(); }
 
+const NAV_GROUPS = [['', ['dashboard', 'kassa', 'sales']], ['Склад', ['products', 'suppliers']], ['Клиенты', ['clients', 'debts', 'marketing']], ['Аналитика', ['reports']], ['Компания', ['staff', 'settings']]];
+const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
+const MOD = isMac ? '⌘' : 'Ctrl';
+function theme() { return document.documentElement.dataset.theme || 'light'; }
+function setTheme(t) { document.documentElement.dataset.theme = t; store.set('tz_theme', t); const b = $('[data-theme-btn]'); if (b) b.innerHTML = t === 'dark' ? ICON.sun : ICON.moon; if (location.hash === '#dashboard') route(); }
 function renderShell() {
-  const nav = allowed().map(k => `<a href="#${k}" data-r="${k}">${ICONS[k]}<span>${ROUTES[k].t}</span></a>`).join('');
-  const role = S.me.is_owner ? 'Владелец' : 'Сотрудник';
+  const ok = allowed();
+  const nav = NAV_GROUPS.map(([h, keys]) => { const ks = keys.filter(k => ok.includes(k)); return ks.length ? `${h ? `<div class="nav-h">${h}</div>` : ''}${ks.map(k => `<a href="#${k}" data-r="${k}">${ICONS[k]}<span>${ROUTES[k].t}</span>${k === 'debts' ? '<span class="badge" id="debtBadge" hidden></span>' : ''}</a>`).join('')}` : ''; }).join('');
   $('#root').innerHTML = `<div class="app">
-    <header class="topbar"><button class="btn ghost sm" type="button" data-menu aria-label="Открыть меню">☰</button><b>Тарози</b></header>
+    <header class="topbar"><button class="icon-btn" type="button" data-menu aria-label="Открыть меню">${ICON.menu}</button><b>Тарози</b><button class="icon-btn" type="button" data-cmdk aria-label="Поиск">${ICON.search}</button></header>
     <nav class="side" aria-label="Разделы">
-      <div class="brand">${LOGO}<span>Тарози</span></div>
-      ${S.stores.length > 1 ? `<label class="store-pick field"><span>Магазин</span><select class="input" id="storeSel">${opts(S.stores, S.storeId)}</select></label>`
-        : S.stores[0] ? `<p class="note" style="margin:0 12px 12px">${esc(S.stores[0].name)}</p>` : ''}
+      <div class="brand">${LOGO}<span>${esc(S.company.name)}</span></div>
+      ${S.stores.length > 1 ? `<label class="store-pick"><span class="sr" hidden>Магазин</span><select id="storeSel" aria-label="Магазин">${opts(S.stores, S.storeId)}</select></label>` : ''}
+      <button class="cmd-btn" type="button" data-cmdk>${ICON.search}<span>Поиск и команды</span><kbd>${MOD} K</kbd></button>
       <div class="nav">${nav}</div>
-      <div class="me"><span class="avatar">${esc(initials(S.me.name))}</span><span class="who"><b>${esc(S.me.name)}</b><small>${role} · ${esc(S.company.name)}</small></span>
-        <button class="btn link sm" type="button" data-logout>Выйти</button></div>
+      <div class="side-foot"><div class="me"><span class="avatar">${esc(initials(S.me.name))}</span><span class="who"><b>${esc(S.me.name)}</b><small>${S.me.is_owner ? 'Владелец' : 'Сотрудник'}</small></span>
+        <button class="icon-btn" type="button" data-theme-btn aria-label="Сменить тему">${theme() === 'dark' ? ICON.sun : ICON.moon}</button>
+        <button class="icon-btn" type="button" data-logout aria-label="Выйти">${ICON.logout}</button></div></div>
     </nav>
     <main class="main" id="view"></main></div>`;
   $('.app').addEventListener('click', e => {
     if (e.target.closest('[data-menu]')) $('.app').classList.toggle('menu-open');
     else if (e.target.closest('.nav a')) $('.app').classList.remove('menu-open');
     if (e.target.closest('[data-logout]')) logout();
+    if (e.target.closest('[data-theme-btn]')) setTheme(theme() === 'dark' ? 'light' : 'dark');
+    if (e.target.closest('[data-cmdk]')) { $('.app').classList.remove('menu-open'); openCmdk(); }
   });
   $('#storeSel')?.addEventListener('change', e => { S.storeId = +e.target.value; store.set('tz_store', S.storeId); route(); });
+  refreshBadges();
 }
+async function refreshBadges() {
+  if (!can('clients.read')) return;
+  try { const d = await api('/api/debts' + qs({ status: 'overdue', size: 1 })); const b = $('#debtBadge'); if (b) { b.textContent = d.summary.overdue; b.hidden = !d.summary.overdue; b.title = 'Просроченные долги'; } } catch { /* не критично */ }
+}
+const skeleton = () => `<div style="display:grid;gap:16px"><div class="sk" style="height:28px;width:240px"></div>
+  <div class="kpis">${'<div class="sk" style="height:84px"></div>'.repeat(4)}</div><div class="sk" style="height:320px"></div></div>`;
 function route() {
   if (!S.me) return;
   const list = allowed();
   let key = location.hash.slice(1);
   if (!list.includes(key)) { key = list[0]; if (!key) { $('#view').innerHTML = '<div class="panel empty">У вашей роли нет доступа ни к одному разделу. Попросите владельца выдать права.</div>'; return; } history.replaceState(null, '', '#' + key); }
-  $$('.nav a').forEach(a => a.classList.toggle('on', a.dataset.r === key));
+  $$('.nav a').forEach(a => { const on = a.dataset.r === key; a.classList.toggle('on', on); on ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current'); });
   document.title = `${ROUTES[key].t} — Тарози`;
   const v = $('#view');
-  v.innerHTML = '<div class="empty">Загружаю…</div>'; v.classList.remove('has-cartbar');
+  v.innerHTML = skeleton(); v.classList.remove('has-cartbar', 'view-enter');
+  $('.cartbar')?.remove();
   v.onclick = v.oninput = v.onchange = v.onkeydown = v.onsubmit = null;
-  Promise.resolve(ROUTES[key].render(v)).catch(e => { v.innerHTML = `<div class="panel"><div class="err">${esc(e.message)}</div></div>`; });
+  Promise.resolve(ROUTES[key].render(v)).then(() => { void v.offsetWidth; v.classList.add('view-enter'); })
+    .catch(e => { v.innerHTML = `<div class="panel"><div class="err">${esc(e.message)}</div></div>`; });
 }
 window.addEventListener('hashchange', route);
+
+// ---------- палитра команд (Ctrl/⌘ + K) ----------
+function openCmdk() {
+  if ($('.cmdk-bg') || !S.me) return;
+  const bg = document.createElement('div');
+  bg.className = 'cmdk-bg';
+  bg.innerHTML = `<div class="cmdk" role="dialog" aria-modal="true" aria-label="Поиск и команды"><div class="cmdk-in">${ICON.search}<input placeholder="Найти товар, клиента, чек № или команду…" aria-label="Поиск" autocomplete="off"><kbd>Esc</kbd></div>
+    <div class="cmdk-list" role="listbox"></div><div class="cmdk-f"><span><kbd>↑</kbd> <kbd>↓</kbd> выбрать</span><span><kbd>Enter</kbd> открыть</span><span><kbd>${MOD} K</kbd> открыть отовсюду</span></div></div>`;
+  document.body.append(bg);
+  const input = $('input', bg), list = $('.cmdk-list', bg);
+  let items = [], sel = 0, found = [], seq = 0, loading = false;
+  const close = () => { bg.remove(); document.removeEventListener('keydown', onKey, true); };
+  const base = () => {
+    const nav = allowed().map(k => ({ g: 'Перейти', t: ROUTES[k].t, ic: ICONS[k], run: () => { location.hash = '#' + k; } }));
+    const act = [
+      can('sales.create') && { g: 'Действия', t: 'Новая продажа', ic: ICONS.kassa, r: 'касса', run: () => { location.hash = '#kassa'; } },
+      can('products.write') && { g: 'Действия', t: 'Новый товар', ic: ICON.plus, run: () => productModal(null) },
+      can('stock.manage') && { g: 'Действия', t: 'Приход товара', ic: ICON.box, run: () => stockInModal() },
+      can('clients.write') && { g: 'Действия', t: 'Новый клиент', ic: ICON.user, run: () => clientModal(null, () => route()) },
+      can('sales.return') && { g: 'Действия', t: 'Возврат или обмен', ic: ICON.swap, run: () => returnsModal() },
+      { g: 'Действия', t: theme() === 'dark' ? 'Светлая тема' : 'Тёмная тема', ic: theme() === 'dark' ? ICON.sun : ICON.moon, run: () => setTheme(theme() === 'dark' ? 'light' : 'dark') },
+      { g: 'Действия', t: 'Выйти', ic: ICON.logout, run: () => logout() },
+    ].filter(Boolean);
+    return [...act, ...nav];
+  };
+  const draw = () => {
+    const q = input.value.trim().toLowerCase();
+    items = [...found, ...base().filter(x => !q || x.t.toLowerCase().includes(q))];
+    sel = Math.min(sel, Math.max(0, items.length - 1));
+    let g = '';
+    list.innerHTML = items.length ? items.map((x, i) => `${x.g !== g ? `<div class="cmdk-g">${esc(g = x.g)}</div>` : ''}<div class="cmdk-it ${i === sel ? 'sel' : ''}" data-i="${i}" role="option" aria-selected="${i === sel}">${x.ic || ''}<span>${esc(x.t)}</span>${x.r ? `<span class="r">${esc(x.r)}</span>` : ''}</div>`).join('')
+      : `<p class="empty">${loading ? 'Ищу…' : `Ничего не найдено по «${esc(input.value)}»`}</p>`;
+    list.querySelector('.sel')?.scrollIntoView({ block: 'nearest' });
+  };
+  const search = debounce(async () => {
+    const q = input.value.trim(), my = ++seq;
+    if (q.length < 2) { found = []; loading = false; draw(); return; }
+    loading = true; draw();
+    const jobs = [];
+    if (can('products.read')) jobs.push(api('/api/products' + qs({ q, size: 6, store_id: S.storeId })).then(r => r.items.map(p => ({ g: 'Товары', t: p.name, ic: ICON.box, r: `${money(p.retail_price)} · ${p.is_service ? 'услуга' : num(stockOf(p)) + ' ' + p.unit}`, run: () => productModal(p) }))).catch(() => []));
+    if (can('clients.read')) jobs.push(api('/api/clients' + qs({ q, size: 5 })).then(r => r.items.map(c => ({ g: 'Клиенты', t: c.name, ic: ICON.user, r: c.phone || '', run: () => clientCard(c) }))).catch(() => []));
+    if (can('sales.read') && /^\d+$/.test(q)) jobs.push(api('/api/sales' + qs({ number: q, status: '' })).then(r => r.items.map(s => ({ g: 'Чеки', t: `Чек №${s.number}`, ic: ICONS.sales, r: `${fDateTime(s.created_at)} · ${money(s.total)}`, run: () => saleModal(s) }))).catch(() => []));
+    const res = (await Promise.all(jobs)).flat();
+    if (my !== seq) return;
+    found = res; loading = false; sel = 0; draw();
+  }, 180);
+  const run = i => { const x = items[i]; if (!x) return; close(); x.run(); };
+  const onKey = e => {
+    if (e.key === 'Escape') { e.preventDefault(); close(); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); sel = (sel + 1) % Math.max(1, items.length); draw(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); sel = (sel - 1 + items.length) % Math.max(1, items.length); draw(); }
+    else if (e.key === 'Enter') { e.preventDefault(); run(sel); }
+  };
+  document.addEventListener('keydown', onKey, true);
+  input.addEventListener('input', () => { sel = 0; draw(); search(); });
+  list.addEventListener('mousemove', e => { const it = e.target.closest('[data-i]'); if (it && +it.dataset.i !== sel) { sel = +it.dataset.i; list.querySelectorAll('.cmdk-it').forEach((n, i) => n.classList.toggle('sel', i === sel)); } });
+  list.addEventListener('click', e => { const it = e.target.closest('[data-i]'); if (it) run(+it.dataset.i); });
+  bg.addEventListener('mousedown', e => { if (e.target === bg) close(); });
+  draw(); input.focus();
+}
+document.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K' || e.key === 'л' || e.key === 'Л')) { e.preventDefault(); openCmdk(); }
+});
 
 // ---------- вход и регистрация ----------
 function renderAuth(mode = 'login') {
   const reg = mode === 'register';
-  $('#root').innerHTML = `<div class="auth">
-    <section class="auth-art">
-      <div class="brand" style="padding:0;color:#fff">${LOGO.replace('#1E4BD2', '#fff').replace('stroke="#fff"', 'stroke="#1E4BD2"')}<span>Тарози</span></div>
-      <div><h1>Касса, склад и клиенты в одном окне</h1><p>Продавайте, принимайте товар, ведите долги клиентов и смотрите выручку по дням — с телефона или компьютера.</p></div>
-      <div class="auth-tape" aria-hidden="true"><div><span>Помада матовая × 2</span><span>44.00</span></div><div><span>Шампунь 250 мл</span><span>19.00</span></div><div><span>Скидка VIP</span><span>−6.30</span></div><div style="border:0;font-weight:600"><span>Итого</span><span>56.70</span></div></div>
-    </section>
-    <section class="auth-form"><form class="box" novalidate>
-      <div><h1 style="font-size:30px">${reg ? 'Регистрация магазина' : 'Вход'}</h1>
-      <p class="sub">${reg ? 'Создадим ваш бизнес, первый магазин и аккаунт владельца.' : 'Войдите под своим логином и паролем.'}</p></div>
-      ${reg ? field('Название бизнеса', inp('company_name', { req: true, ph: 'Например, Barber Shop' })) + field('Первый магазин', inp('store_name', { req: true, ph: 'Например, Чиланзар' })) + field('Ваше имя', inp('owner_name', { req: true })) : ''}
+  $('#root').innerHTML = `<div class="auth"><div>
+    <form class="box" novalidate>
+      <div class="brand">${LOGO}<span>Тарози</span></div>
+      <div><h1>${reg ? 'Создать магазин' : 'Вход в Тарози'}</h1>
+      <p class="sub">${reg ? 'Бизнес, первый магазин и аккаунт владельца — за минуту.' : 'Касса, склад и клиенты в одном окне.'}</p></div>
+      ${reg ? field('Название бизнеса', inp('company_name', { req: true, ph: 'Например, Barber Shop' })) + '<div class="two" style="display:grid;grid-template-columns:1fr 1fr;gap:10px">' + field('Первый магазин', inp('store_name', { req: true, ph: 'Чиланзар' })) + field('Валюта', `<select class="input" name="currency"><option>USD</option><option value="UZS">UZS</option><option>RUB</option><option>KZT</option><option>EUR</option></select>`) + '</div>' + field('Ваше имя', inp('owner_name', { req: true })) : ''}
       ${field('Логин', inp('login', { req: true, attrs: 'autocomplete="username" autocapitalize="none"' }))}
       ${field('Пароль', inp('password', { type: 'password', req: true, attrs: `autocomplete="${reg ? 'new-password' : 'current-password'}"`, ph: reg ? 'Не меньше 8 символов' : '' }))}
-      ${reg ? field('Валюта', `<select class="input" name="currency"><option>USD</option><option value="UZS">UZS (сум)</option><option>RUB</option><option>KZT</option><option>EUR</option></select>`) : ''}
       <div class="err" hidden></div>
       <button class="btn big" type="submit">${reg ? 'Создать и войти' : 'Войти'}</button>
-      <p class="sub" style="text-align:center">${reg ? 'Уже есть аккаунт?' : 'Ещё нет аккаунта?'} <a href="#" data-switch>${reg ? 'Войти' : 'Зарегистрировать магазин'}</a></p>
-    </form></section></div>`;
+    </form>
+    <p class="auth-foot">${reg ? 'Уже есть аккаунт?' : 'Ещё нет аккаунта?'} <a href="#" data-switch>${reg ? 'Войти' : 'Создать магазин'}</a></p></div></div>`;
   const f = $('form');
   $('[data-switch]').onclick = e => { e.preventDefault(); renderAuth(reg ? 'login' : 'register'); };
   setTimeout(() => $('input', f)?.focus(), 30);
@@ -243,11 +340,80 @@ const segPeriods = (cur, keys = Object.keys(PERIODS)) => `<div class="seg" role=
 const delta = (cur, prev) => {
   if (!prev) return cur ? '<small class="muted">нет данных за прошлый период</small>' : '<small>&nbsp;</small>';
   const p = Math.round((cur - prev) / prev * 100);
-  return `<small class="${p >= 0 ? 'good' : 'bad'}">${p >= 0 ? '+' : ''}${p}% к прошлому периоду</small>`;
+  return `<span class="delta ${p > 0 ? 'up' : p < 0 ? 'down' : 'flat'}">${p > 0 ? '↑' : p < 0 ? '↓' : ''}${Math.abs(p)}%</span> <small>к прошлому периоду</small>`;
 };
 
 // ================= ГЛАВНАЯ =================
 const D = { period: store.get('tz_period') || 'week', store: '' };
+const SERIES = [['cash', 'Наличные', 'var(--c-cash)'], ['card', 'Карта', 'var(--c-card)'], ['debt', 'В долг', 'var(--c-debt)'], ['bonus', 'Бонусы', 'var(--c-bonus)'], ['exchange', 'Обмен', 'var(--c-ex)']];
+const short = v => Math.abs(v) >= 1e6 ? (v / 1e6).toFixed(1).replace('.0', '') + 'M' : Math.abs(v) >= 1e3 ? (v / 1e3).toFixed(1).replace('.0', '') + 'K' : String(Math.round(v));
+function niceMax(v) { if (v <= 0) return 1; const p = 10 ** Math.floor(Math.log10(v)), n = v / p; return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * p; }
+function groupBars(rows, byMonth) {
+  if (!byMonth) return rows.map(r => ({ ...r }));
+  const m = new Map();
+  for (const x of rows) { const k = x.date.slice(0, 7); const a = m.get(k) || { date: k }; for (const [f] of SERIES) a[f] = (a[f] || 0) + (x[f] || 0); a.net = (a.net || 0) + x.net; m.set(k, a); }
+  return [...m.values()];
+}
+const dayLabel = (d, n) => d.length === 7 ? MONTHS[+d.slice(5) - 1] : n <= 7 ? WD[new Date(d + 'T00:00').getDay()] : fDay(d);
+// столбцы по способам оплаты + пунктир прошлого периода; подсказка при наведении
+function drawChart(box, bars, prev) {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const tip = document.createElement('div'); tip.className = 'tip'; tip.hidden = true;
+  const svg = document.createElementNS(svgNS, 'svg'); svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', `График выручки: ${bars.map(b => `${dayLabel(b.date, bars.length)} ${num(Math.round(b.net))}`).join(', ')}`);
+  box.append(svg, tip);
+  const tot = b => SERIES.reduce((a, [f]) => a + (b[f] || 0), 0);
+  const draw = () => {
+    const W = box.clientWidth, H = box.clientHeight, L = 44, R = 6, T = 8, B = 26;
+    if (W < 120 || H < 80) return;
+    const max = niceMax(Math.max(1, ...bars.map(tot), ...(prev || []).map(p => p.net || 0)));
+    const n = bars.length, step = (W - L - R) / n, bw = Math.max(3, Math.min(40, step * .62));
+    const y = v => T + (H - T - B) * (1 - v / max), x = i => L + step * i + step / 2;
+    const every = Math.ceil(n / Math.max(4, Math.floor((W - L) / 64)));
+    let h = '';
+    for (let k = 0; k <= 4; k++) { const v = max * k / 4, yy = y(v); h += `<line x1="${L}" x2="${W - R}" y1="${yy}" y2="${yy}" stroke="var(--line)" ${k ? 'stroke-dasharray="2 4"' : ''}/><text x="${L - 8}" y="${yy + 4}" text-anchor="end" font-size="11" fill="var(--faint)">${short(v)}</text>`; }
+    bars.forEach((b, i) => {
+      let acc = 0;
+      const parts = SERIES.filter(([f]) => b[f] > 0);
+      parts.forEach(([f, , c], j) => {
+        const y0 = y(acc), y1 = y(acc + b[f]); acc += b[f];
+        const top = j === parts.length - 1, r = top ? Math.min(4, bw / 2) : 0, hh = Math.max(0, y0 - y1);
+        h += top && hh > r ? `<path d="M${x(i) - bw / 2},${y0}V${y1 + r}q0,-${r} ${r},-${r}h${bw - 2 * r}q${r},0 ${r},${r}V${y0}z" fill="${c}"/>` : `<rect x="${x(i) - bw / 2}" y="${y1}" width="${bw}" height="${hh}" fill="${c}"/>`;
+      });
+      if (i % every === 0) h += `<text x="${x(i)}" y="${H - 8}" text-anchor="middle" font-size="11" fill="var(--muted)">${dayLabel(b.date, n)}</text>`;
+    });
+    if (prev && prev.length === n) h += `<path d="${prev.map((p, i) => `${i ? 'L' : 'M'}${x(i)},${y(Math.max(0, p.net))}`).join('')}" fill="none" stroke="var(--faint)" stroke-width="1.5" stroke-dasharray="4 4"/>`;
+    h += `<rect class="hl" x="0" y="${T}" width="${step}" height="${H - T - B}" fill="var(--ink)" opacity="0" rx="6"/>`;
+    svg.innerHTML = h;
+    svg.onmousemove = e => {
+      const r = svg.getBoundingClientRect(), i = Math.floor((e.clientX - r.left - L) / step);
+      if (i < 0 || i >= n) { tip.hidden = true; return; }
+      const b = bars[i], hl = svg.querySelector('.hl'); hl.setAttribute('x', L + step * i); hl.setAttribute('opacity', '.05');
+      const name = b.date.length === 7 ? `${MONTHS[+b.date.slice(5) - 1]} ${b.date.slice(0, 4)}` : new Date(b.date + 'T00:00').toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric', month: 'long' });
+      tip.innerHTML = `<b>${name}</b>${SERIES.filter(([f]) => b[f]).map(([f, t, c]) => `<div><span><i style="background:${c}"></i>${t}</span><span>${num(b[f])}</span></div>`).join('') || '<div class="muted">Продаж не было</div>'}
+        <div style="border-top:1px solid var(--line);margin-top:5px;padding-top:5px"><span>Чистая выручка</span><b style="margin:0">${num(b.net)}</b></div>${prev?.[i] ? `<div class="muted"><span>Прошлый период</span><span>${num(prev[i].net)}</span></div>` : ''}`;
+      tip.hidden = false;
+      const tx = L + step * i + step / 2 + 14, tw = tip.offsetWidth;
+      tip.style.left = (tx + tw > W ? tx - tw - 28 : tx) + 'px'; tip.style.top = Math.max(0, e.clientY - r.top - 40) + 'px';
+    };
+    svg.onmouseleave = () => { tip.hidden = true; svg.querySelector('.hl')?.setAttribute('opacity', '0'); };
+  };
+  new ResizeObserver(draw).observe(box);
+}
+function spark(vals, color = 'var(--accent)') {
+  if (vals.length < 2 || !vals.some(v => v)) return '';
+  const mx = Math.max(...vals, 1), mn = Math.min(...vals, 0), w = 72, h = 26;
+  const pts = vals.map((v, i) => [i / (vals.length - 1) * w, h - 2 - (v - mn) / (mx - mn || 1) * (h - 4)]);
+  const d = pts.map((p, i) => `${i ? 'L' : 'M'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join('');
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" aria-hidden="true"><path d="${d}L${w},${h}L0,${h}z" fill="${color}" opacity=".1"/><path d="${d}" fill="none" stroke="${color}" stroke-width="1.6" stroke-linejoin="round"/></svg>`;
+}
+function donut(parts) {
+  const total = parts.reduce((a, p) => a + p.v, 0) || 1, r = 52, c = 2 * Math.PI * r;
+  let off = 0;
+  return `<svg class="donut" viewBox="0 0 128 128" role="img" aria-label="${esc(parts.map(p => `${p.t} ${Math.round(p.v / total * 100)}%`).join(', '))}"><circle cx="64" cy="64" r="${r}" fill="none" stroke="var(--sunken)" stroke-width="14"/>
+    ${parts.filter(p => p.v > 0).map(p => { const len = p.v / total * c; const s = `<circle cx="64" cy="64" r="${r}" fill="none" stroke="${p.c}" stroke-width="14" stroke-dasharray="${Math.max(0, len - 2)} ${c}" stroke-dashoffset="${-off}" transform="rotate(-90 64 64)"/>`; off += len; return s; }).join('')}
+    <text x="64" y="61" text-anchor="middle" font-size="11" fill="var(--muted)">оплачено</text><text x="64" y="78" text-anchor="middle" font-size="15" font-weight="700" fill="var(--ink)">${short(total)}</text></svg>`;
+}
 async function viewDashboard(v) {
   const r = periodRange(D.period), pr = periodRange(D.period, 1);
   const sq = D.store ? { store_id: D.store } : {};
@@ -256,81 +422,60 @@ async function viewDashboard(v) {
     api('/api/reports/dashboard' + qs({ ...sq, date_from: pr.from, date_to: pr.to })),
     can('sales.read') ? api('/api/sales' + qs({ ...sq, date_from: today(), date_to: today(), size: 40 })) : null,
   ]);
-  const label = { today: 'сегодня', week: 'неделю', month: 'месяц', quarter: 'квартал', year: 'год' }[D.period];
-  const net = d.revenue.net, checks = d.transactions.count;
-  const p = d.payments, payTotal = p.cash + p.card + p.debt + p.bonus;
-
-  // график: по дням, за год — по месяцам
-  let bars = d.by_day;
-  if (D.period === 'year') {
-    const m = new Map();
-    for (const x of bars) { const k = x.date.slice(0, 7); const a = m.get(k) || { date: k, net: 0, cash: 0, card: 0, debt: 0, bonus: 0 }; for (const f of ['net', 'cash', 'card', 'debt', 'bonus']) a[f] += x[f]; m.set(k, a); }
-    bars = [...m.values()];
-  }
-  const max = Math.max(1, ...bars.map(b => b.cash + b.card + b.debt + b.bonus));
-  const every = Math.ceil(bars.length / 12);
-  const barLabel = (b, i) => {
-    if (b.date.length === 7) return `<b>${MONTHS[+b.date.slice(5) - 1]}</b>`;
-    if (i % every) return '';
-    const dd = new Date(b.date + 'T00:00');
-    return bars.length <= 7 ? `<b>${WD[dd.getDay()]}</b><br>${fDay(b.date)}` : fDay(b.date);
-  };
-  const chart = `<div class="bars ${bars.length > 14 ? 'many' : ''}">${bars.map(b => {
-    const t = b.cash + b.card + b.debt + b.bonus, pc = x => t ? (x / t * 100).toFixed(1) + '%' : '0';
-    return `<div class="bar" title="${esc(`${b.date.length === 7 ? b.date : fDay(b.date)}: наличные ${num(b.cash)}, карта ${num(b.card)}, в долг ${num(b.debt)}${b.bonus ? `, бонусы ${num(b.bonus)}` : ''}`)}">
-      <span class="v num">${t ? num(Math.round(t)) : ''}</span>
-      <div class="stack" style="height:${(t / max * 86).toFixed(1)}%"><div style="height:${pc(b.bonus)};background:#E8A92E"></div><div style="height:${pc(b.debt)};background:var(--red)"></div><div style="height:${pc(b.card)};background:var(--card)"></div><div style="flex:1;background:var(--blue)"></div></div></div>`;
-  }).join('')}</div><div class="xlab">${bars.map((b, i) => `<span>${barLabel(b, i)}</span>`).join('')}</div>`;
-
+  const label = { today: 'сегодня', week: 'за неделю', month: 'за месяц', quarter: 'за квартал', year: 'за год' }[D.period];
+  const net = d.revenue.net, checks = d.transactions.count, p = d.payments;
+  const byMonth = D.period === 'year';
+  const bars = groupBars(d.by_day, byMonth), prevBars = groupBars(prev.by_day, byMonth);
+  const nets = d.by_day.map(x => x.net);
   const topP = d.top_products, maxP = Math.max(1, ...topP.map(x => x.net));
   const tgt = d.target;
-  const tape = todays ? `<aside class="aside"><div class="tape">
-      <div class="head" style="align-items:baseline"><h2>Чеки сегодня</h2>${S.stores.length ? '<span class="live">● касса открыта</span>' : ''}</div>
-      <div class="line"></div>
-      ${todays.items.length ? todays.items.slice(0, 12).map(s => `<div class="rcpt"><div class="t"><span class="muted">${fTime(s.created_at)} · №${s.number}</span><b>${money(s.total)}</b></div>
-        <div class="t"><span>${esc(s.items.map(i => i.name).slice(0, 2).join(', '))}${s.items.length > 2 ? ` и ещё ${s.items.length - 2}` : ''}</span><span class="${s.payments.some(x => x.method === 'debt') ? 'bad' : 'good'}">${esc(s.payments.map(x => PAY[x.method]).join(' + '))}</span></div></div>`).join('')
-        : '<p class="empty mono">Сегодня ещё не было продаж</p>'}
-      <div class="t mono" style="display:flex;justify-content:space-between;padding-top:12px;font-weight:600"><span>Итого за день</span><span>${money(todays.items.reduce((a, s) => a + s.total - s.returned_total, 0))}</span></div>
-      <div class="mono note" style="display:flex;justify-content:space-between"><span>Чеков</span><span>${todays.total}</span></div>
-      <div style="display:grid;gap:8px;margin-top:14px">${can('sales.create') ? '<a class="btn" href="#kassa">Открыть кассу</a>' : ''}<a class="btn ghost" href="#sales">Все продажи</a></div>
-    </div></aside>` : '';
+  const payParts = SERIES.map(([f, t, c]) => ({ t, c, v: p[f] || 0 })).filter(x => x.v > 0);
+  const payTotal = payParts.reduce((a, x) => a + x.v, 0);
 
   v.innerHTML = `
-  <div class="head"><div><h1>${checks ? `Выручка за ${label}: ${money(net)}` : `За ${label} продаж нет`}</h1>
-    <p class="sub">${r.from === r.to ? fDay(r.from) : `${fDay(r.from)} — ${fDay(r.to)}`}${checks ? `, ${checks} ${plural(checks, 'чек', 'чека', 'чеков')}` : '. Проведите первую продажу на кассе — она сразу появится здесь'}</p></div>
-    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
-      ${S.stores.length > 1 ? `<select class="input" id="dStore" style="width:auto">${opts(S.stores, D.store, 'id', 'name', 'Все магазины')}</select>` : ''}
-      ${segPeriods(D.period, ['today', 'week', 'month', 'year'])}</div></div>
+  <div class="head"><div><h1>Обзор</h1><p class="sub">${r.from === r.to ? fDay(r.from) : `${fDay(r.from)} — ${fDay(r.to)}`}${checks ? '' : ' · продаж пока нет — проведите первую на кассе'}</p></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      ${S.stores.length > 1 ? `<select class="input" id="dStore" style="width:auto;height:32px">${opts(S.stores, D.store, 'id', 'name', 'Все магазины')}</select>` : ''}
+      ${segPeriods(D.period, ['today', 'week', 'month', 'year'])}
+      ${can('sales.create') ? `<a class="btn" href="#kassa">${ICON.plus}Новая продажа</a>` : ''}</div></div>
   <div class="kpis">
-    <div class="kpi"><span>Чистая выручка</span><b class="num">${money(net)}</b>${delta(net, prev.revenue.net)}</div>
-    <div class="kpi"><span>Чеков</span><b class="num">${num(checks)}</b>${delta(checks, prev.transactions.count)}</div>
-    <div class="kpi"><span>Средний чек</span><b class="num">${money(d.transactions.average_check)}</b><small class="muted">${num(d.transactions.goods_qty)} шт. товаров${d.transactions.services_qty ? `, ${num(d.transactions.services_qty)} услуг` : ''}</small></div>
-    <div class="kpi"><span>Отдано в долг</span><b class="num ${p.debt ? 'bad' : ''}">${money(p.debt)}</b><small class="muted">${payTotal ? Math.round(p.debt / payTotal * 100) : 0}% от оплат${d.transactions.returns_count ? `, возвратов: ${d.transactions.returns_count}` : ''}</small></div>
+    <div class="kpi"><span>Чистая выручка</span><b>${money(net)}</b>${delta(net, prev.revenue.net)}${spark(nets)}</div>
+    <div class="kpi"><span>Чеков</span><b>${num(checks)}</b>${delta(checks, prev.transactions.count)}</div>
+    <div class="kpi"><span>Средний чек</span><b>${money(d.transactions.average_check)}</b>${delta(d.transactions.average_check, prev.transactions.average_check)}</div>
+    <div class="kpi"><span>Отдано в долг</span><b class="${p.debt ? 'bad' : ''}">${money(p.debt)}</b><small>${payTotal ? Math.round(p.debt / payTotal * 100) : 0}% от оплат${d.transactions.returns_count ? ` · возвратов ${d.transactions.returns_count}` : ''}</small>${spark(d.by_day.map(x => x.debt), 'var(--c-debt)')}</div>
   </div>
   <div class="row">
     <div class="grow grid">
-      <section class="panel"><div class="head" style="align-items:baseline"><h2>Продажи по ${bars[0]?.date.length === 7 ? 'месяцам' : 'дням'} и способам оплаты</h2>
-        <div class="legend"><span><i style="background:var(--blue)"></i>Наличные ${money(p.cash)}</span><span><i style="background:var(--card)"></i>Карта ${money(p.card)}</span><span><i style="background:var(--red)"></i>В долг ${money(p.debt)}</span>${p.bonus ? `<span><i style="background:#E8A92E"></i>Бонусы ${money(p.bonus)}</span>` : ''}</div></div>
-        ${chart}</section>
-      <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(260px,1fr))">
-        <section class="panel"><h2>Лучшие товары</h2>${topP.length ? topP.slice(0, 6).map(x => `<div style="padding:8px 0;border-top:1px solid #EEF0F5">
-          <div style="display:flex;justify-content:space-between;gap:12px"><span>${esc(x.name)} <small class="muted">· ${num(x.qty)} шт.</small></span><b class="num" style="white-space:nowrap">${money(x.net)}</b></div>
-          <div class="meter"><div style="width:${(x.net / maxP * 100).toFixed(0)}%"></div></div></div>`).join('') : '<p class="empty">Нет продаж за период</p>'}</section>
-        <section class="panel" style="display:grid;gap:12px;align-content:start"><h2>Продавцы и цель</h2>
-          ${d.top_sellers.length ? d.top_sellers.slice(0, 4).map(x => { const [bg, fg] = tint(x.seller_id); return `<div style="display:flex;align-items:center;gap:12px">
-            <span class="avatar" style="background:${bg};color:${fg}">${esc(initials(x.name))}</span><span style="flex:1">${esc(x.name)}</span><b class="num">${money(x.net)}</b></div>`; }).join('') : '<p class="muted" style="margin:0">Нет продаж за период</p>'}
-          ${tgt ? `<div style="padding:14px 16px;background:var(--bg);border-radius:12px">
-            <div style="display:flex;justify-content:space-between;gap:8px;font-size:14px"><span>Цель до ${fDay(tgt.period_end)}</span><span class="num"><b>${num(tgt.done)}</b> из ${money(tgt.amount)}</span></div>
+      <section class="panel"><div class="head" style="align-items:baseline"><div><h2>Выручка ${label}</h2><p class="sub" style="margin:2px 0 0">${byMonth ? 'По месяцам' : 'По дням'}, разбивка по способам оплаты. Пунктир — прошлый период</p></div>
+        <div class="legend">${SERIES.filter(([f]) => p[f]).map(([f, t, c]) => `<span><i style="background:${c}"></i>${t}</span>`).join('')}<span><i style="background:none;border-top:2px dashed var(--faint);height:0;width:12px;vertical-align:3px"></i>Прошлый</span></div></div>
+        <div class="chart" id="chart"></div></section>
+      <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr))">
+        <section class="panel"><h2>Лучшие товары</h2>${topP.length ? `<div class="blist">${topP.slice(0, 7).map(x => `<div class="it" style="--w:${(x.net / maxP * 100).toFixed(1)}%"><span>${esc(x.name)} <small class="muted">${num(x.qty)} шт</small></span><b>${money(x.net)}</b></div>`).join('')}</div>` : '<p class="empty">Нет продаж за период</p>'}</section>
+        <section class="panel"><h2>Как платят</h2>${payParts.length ? `<div class="donut-wrap">${donut(payParts)}<div class="legend" style="display:grid;gap:6px;flex:1">${payParts.map(x => `<span style="display:flex;justify-content:space-between;gap:10px"><span><i style="background:${x.c}"></i>${x.t}</span><b class="num">${Math.round(x.v / payTotal * 100)}%</b></span>`).join('')}</div></div>` : '<p class="empty">Нет оплат за период</p>'}</section>
+        <section class="panel" style="display:grid;gap:10px;align-content:start"><h2 style="margin:0">Продавцы</h2>
+          ${d.top_sellers.length ? `<div class="blist">${d.top_sellers.slice(0, 5).map(x => `<div class="it" style="--w:${(x.net / Math.max(1, d.top_sellers[0].net) * 100).toFixed(1)}%"><span>${esc(x.name)}</span><b>${money(x.net)}</b></div>`).join('')}</div>` : '<p class="muted" style="margin:0">Нет продаж за период</p>'}
+          ${tgt ? `<div style="padding:12px;background:var(--sunken);border-radius:10px;border:1px solid var(--line)">
+            <div style="display:flex;justify-content:space-between;gap:8px;font-size:13px"><span>Цель до ${fDay(tgt.period_end)}</span><span class="num"><b>${num(tgt.done)}</b> / ${money(tgt.amount)}</span></div>
             <div class="meter teal"><div style="width:${Math.min(100, tgt.percent)}%"></div></div>
-            <span class="note">${tgt.percent >= 100 ? 'Цель выполнена' : `Выполнено ${tgt.percent}%. Нужно продавать по ${money(tgt.per_day_needed)} в день`}</span></div>`
-            : can('settings.manage') ? `<button class="btn ghost" type="button" data-a="target">Поставить цель по выручке</button>` : ''}
+            <span class="note">${tgt.percent >= 100 ? 'Цель выполнена' : `${tgt.percent}% · нужно ${money(tgt.per_day_needed)} в день`}</span></div>`
+            : can('settings.manage') ? `<button class="btn ghost" type="button" data-a="target">${ICON.plus}Поставить цель по выручке</button>` : ''}
         </section></div>
-    </div>${tape}</div>`;
-
+    </div>
+    ${todays ? `<aside class="aside"><div class="tape">
+      <div class="head" style="align-items:center"><h2>Сегодня</h2><span class="live">${todays.total} ${plural(todays.total, 'чек', 'чека', 'чеков')}</span></div>
+      <div class="line"></div>
+      ${todays.items.length ? todays.items.slice(0, 12).map(s => `<div class="rcpt click" data-sale="${s.id}" style="cursor:pointer"><div class="t"><span class="muted">${fTime(s.created_at)} · №${s.number}</span><b>${money(s.total)}</b></div>
+        <div class="t"><span>${esc(s.items.map(i => i.name).slice(0, 2).join(', '))}${s.items.length > 2 ? ` +${s.items.length - 2}` : ''}</span><span class="${s.payments.some(x => x.method === 'debt') ? 'bad' : 'muted'}">${esc(s.payments.map(x => PAY[x.method] || x.method).join(' + '))}</span></div></div>`).join('')
+        : '<p class="empty">Сегодня ещё не было продаж</p>'}
+      <div style="display:flex;justify-content:space-between;padding-top:10px;border-top:1px solid var(--line);margin-top:4px;font-weight:600"><span>Итого за день</span><span class="num">${money(todays.items.reduce((a, s) => a + s.total - s.returned_total, 0))}</span></div>
+      <a class="btn ghost" href="#sales" style="width:100%;margin-top:12px">Все продажи</a>
+    </div></aside>` : ''}</div>`;
+  drawChart($('#chart', v), bars, prevBars.length === bars.length ? prevBars : null);
   v.onclick = e => {
     const pb = e.target.closest('[data-period]');
     if (pb) { D.period = pb.dataset.period; store.set('tz_period', D.period); route(); }
     if (e.target.closest('[data-a=target]')) targetModal();
+    const rc = e.target.closest('[data-sale]'); if (rc) saleModal(todays.items.find(s => s.id === +rc.dataset.sale));
   };
   v.onchange = e => { if (e.target.id === 'dStore') { D.store = e.target.value; route(); } };
 }
@@ -348,147 +493,131 @@ function targetModal() {
 }
 
 // ================= КАССА =================
-const K = { cat: '', q: '', products: [], cart: [], client: null, pay: 'cash', split: { cash: '', card: '', debt: '' }, received: '', promo: '', bonus: '',
-  quote: null, qErr: '', done: null, lastSale: null, seller: null, sellers: [], wholesale: false, disc: '', discType: '%', note: '', noteOpen: false,
-  due: '', exchange: null };
+const K = { cat: '', q: '', products: [], cart: [], client: null, promo: '', quote: null, qErr: '', seller: null, sellers: [], wholesale: false,
+  disc: '', discType: '%', note: '', panel: null, exchange: null, sel: -1 };
+const PS = { method: 'cash', received: '', split: { cash: '', card: '', debt: '' }, due: '', bonus: '', refund: 'cash' };
 async function viewKassa(v) {
   if (!S.storeId) { v.innerHTML = '<div class="panel empty">Нет доступного магазина. Владелец может добавить магазин в настройках.</div>'; return; }
   const [prods, sellers] = await Promise.all([api('/api/products' + qs({ status: 'active', size: 500, store_id: S.storeId })), api('/api/sales/sellers')]);
   K.products = prods.items; K.sellers = sellers;
   if (!K.seller || !sellers.some(s => s.id === K.seller)) K.seller = S.me.id;
-  drawKassa(v);
+  v.innerHTML = `<div class="head"><div><h1>${K.exchange ? `Обмен по чеку №${K.exchange.sale.number}` : 'Касса'}</h1><p class="sub">${esc(S.stores.find(s => s.id === S.storeId)?.name || '')} · <kbd>/</kbd> поиск · <kbd>J</kbd> клиент · <kbd>K</kbd> скидка · <kbd>L</kbd> оплатить · <kbd>O</kbd> отложить</p></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn ghost" type="button" data-held>${ICON.pause}Отложенные</button>${can('sales.return') ? `<button class="btn ghost" type="button" data-returns>${ICON.swap}Возврат и обмен</button>` : ''}</div></div>
+  <div class="pos"><section class="grid" aria-label="Товары" style="gap:12px">
+    <label class="search" style="height:42px">${ICON.search}<input id="kq" placeholder="Название, артикул или штрихкод — Enter добавит" value="${esc(K.q)}" autocomplete="off" aria-label="Поиск товара"><kbd>/</kbd></label>
+    <div class="chips" role="group" aria-label="Категории"><button type="button" class="chip ${!K.cat ? 'on' : ''}" data-cat="">Все</button>${S.cats.map(c => `<button type="button" class="chip ${K.cat === String(c.id) ? 'on' : ''}" data-cat="${c.id}">${esc(c.name)}</button>`).join('')}</div>
+    <div id="tiles">${kassaTiles()}</div></section>
+    <aside id="check" aria-label="Чек">${kassaCart()}</aside></div>`;
+  cartBar();
   bindKassa(v);
   requote();
 }
 const stockOf = p => +(p.stock?.[S.storeId] || 0);
 const hasWholesale = () => K.products.some(p => p.wholesale_price != null);
 const priceOf = p => (K.wholesale && p.wholesale_price != null ? p.wholesale_price : p.retail_price);
-function kassaTiles() {
+const visibleProducts = () => {
   const q = K.q.trim().toLowerCase();
-  const list = K.products.filter(p => (!K.cat || String(p.category_id) === K.cat) &&
-    (!q || p.name.toLowerCase().includes(q) || (p.sku || '').toLowerCase().includes(q) || (p.barcode || '') === q));
+  return K.products.filter(p => (!K.cat || String(p.category_id) === K.cat) &&
+    (!q || p.name.toLowerCase().includes(q) || (p.sku || '').toLowerCase().includes(q) || (p.barcode || '') === q)).slice(0, 120);
+};
+function kassaTiles() {
+  const list = visibleProducts();
   if (!K.products.length) return `<div class="panel empty">В каталоге пока нет товаров. ${can('products.write') ? '<a href="#products">Добавьте первый товар</a>' : 'Попросите менеджера добавить товары'}.</div>`;
   if (!list.length) return '<div class="panel empty">Ничего не найдено. Проверьте название или отсканируйте штрихкод ещё раз.</div>';
-  const neg = S.company.allow_negative_stock;
-  return `<div class="tiles">${list.slice(0, 120).map(p => {
+  const neg = S.company.allow_negative_stock, inCart = Object.fromEntries(K.cart.map(l => [l.p.id, l.qty]));
+  return `<div class="tiles">${list.map((p, i) => {
     const st = stockOf(p), out = !p.is_service && st <= 0 && !neg, [bg, fg] = tint(p.category_id || p.id);
-    return `<button class="tile" type="button" data-add="${p.id}" ${out ? 'disabled' : ''}>
+    return `<button class="tile ${i === K.sel ? 'sel' : ''}" type="button" data-add="${p.id}" ${out ? 'disabled' : ''}>
+      ${inCart[p.id] ? `<span class="cnt">${num(inCart[p.id])}</span>` : ''}
       <span class="pic" style="background:${bg};color:${fg}" aria-hidden="true">${esc(initials(p.name))}</span>
       <span class="nm">${esc(p.name)}</span>
-      <span class="pr"><b class="num">${money(priceOf(p))}</b><small class="${p.is_service ? 'muted' : st <= 0 ? 'bad' : st <= +S.company.low_stock_threshold ? 'warn' : 'muted'}">${p.is_service ? 'услуга' : st <= 0 ? 'нет в наличии' : `${num(st)} ${esc(p.unit)}`}</small></span></button>`;
+      <span class="pr"><b>${money(priceOf(p))}</b><small class="${p.is_service ? 'muted' : st <= 0 ? 'bad' : st <= +S.company.low_stock_threshold ? 'warn' : 'muted'}">${p.is_service ? 'услуга' : st <= 0 ? 'нет' : `${num(st)} ${esc(p.unit)}`}</small></span></button>`;
   }).join('')}</div>`;
 }
-// сколько платить и сколько уже распределено по способам
-function payState() {
-  const q = K.quote, total = q?.total ?? 0;
+const drawTiles = () => { const t = $('#tiles'); if (t) t.innerHTML = kassaTiles(); };
+const checkClient = () => (K.exchange ? K.exchange.client : K.client);
+function totals() {
+  const q = K.quote, total = q?.total ?? K.cart.reduce((a, l) => a + l.qty * priceOf(l.p), 0);
   const credit = K.exchange ? K.exchange.credit : 0;
-  const bonusMax = q?.bonus_max_for_this_sale ?? 0, bonus = K.exchange ? 0 : Math.min(+K.bonus || 0, bonusMax);
-  const toPay = Math.max(0, +(total - bonus - credit).toFixed(2));
-  const refund = K.exchange ? Math.max(0, +(credit - total).toFixed(2)) : 0;
-  let payments = [];
-  if (toPay > 0) {
-    if (K.pay === 'split') payments = ['cash', 'card', 'debt'].map(m => ({ method: m, amount: +(+K.split[m] || 0).toFixed(2) })).filter(p => p.amount > 0);
-    else payments = [{ method: K.pay, amount: toPay }];
-  }
-  const given = +payments.reduce((a, p) => a + p.amount, 0).toFixed(2);
-  const usesDebt = payments.some(p => p.method === 'debt');
-  const cash = K.pay === 'cash' ? toPay : (+K.split.cash || 0);
-  const change = K.pay === 'cash' && +K.received > toPay ? +K.received - toPay : 0;
-  return { total, bonus, bonusMax, toPay, refund, payments, given, usesDebt, change, cash };
+  return { total, credit, toPay: Math.max(0, +(total - credit).toFixed(2)), refund: Math.max(0, +(credit - total).toFixed(2)) };
 }
-function kassaCheck() {
-  const q = K.quote, c = K.exchange ? K.exchange.client : K.client, ps = payState();
+function kassaCart() {
+  const q = K.quote, c = checkClient(), t = totals();
+  const n = K.cart.reduce((a, l) => a + l.qty, 0);
   const lines = K.cart.map((l, i) => {
     const qi = q?.items?.[i];
-    return `<div class="cart-line"><div class="t"><span>${esc(l.p.name)}</span><b class="num">${money(qi ? qi.total : priceOf(l.p) * l.qty)}</b></div>
-      ${qi?.discount ? `<div class="t note"><span>${esc(qi.promotion || 'Скидка')}</span><span>−${num(qi.discount)}</span></div>` : ''}
-      <div class="qty"><button type="button" data-dec="${i}" aria-label="Меньше">−</button><input class="num" data-qty="${i}" value="${num(l.qty).replace(/\s/g, '')}" inputmode="decimal" aria-label="Количество">
-      <button type="button" data-inc="${i}" aria-label="Больше">+</button><span style="margin-left:auto">× ${num(qi ? qi.price : priceOf(l.p))}</span></div></div>`;
+    return `<div class="cart-line"><div class="t"><span>${esc(l.p.name)}</span><b>${money(qi ? qi.total : priceOf(l.p) * l.qty)}</b></div>
+      <div class="qty"><button type="button" data-dec="${i}" aria-label="Меньше">−</button><input data-qty="${i}" value="${num(l.qty).replace(/\s/g, '')}" inputmode="decimal" aria-label="Количество">
+      <button type="button" data-inc="${i}" aria-label="Больше">+</button><span style="margin-left:auto">× ${num(qi ? qi.price : priceOf(l.p))}${qi?.discount ? ` · <span class="good">−${num(qi.discount)}${qi.promotion ? ' ' + esc(qi.promotion) : ''}</span>` : ''}</span></div></div>`;
   }).join('');
-  const sellerSel = K.sellers.length > 1 ? `<label class="field"><span>Продавец</span><select class="input" id="kSeller">${opts(K.sellers, K.seller)}</select></label>` : '';
-  const discBlock = can('sales.discount') && !K.exchange ? `<div class="field"><span>Ручная скидка <small class="muted">(K)</small></span>
-      <div style="display:flex;gap:8px;align-items:center"><input class="input" id="kDisc" type="number" min="0" step="0.01" value="${esc(K.disc)}" placeholder="0" style="min-height:40px">
-      <div class="seg" role="group" aria-label="Тип скидки"><button type="button" data-dt="%" class="${K.discType === '%' ? 'on' : ''}">%</button><button type="button" data-dt="sum" class="${K.discType === 'sum' ? 'on' : ''}">${esc(S.company.currency || 'сумма')}</button></div></div>
-      <div class="chips">${[15, 30, 50, 75].map(x => `<button type="button" class="chip" style="min-height:32px;padding:0 12px" data-quick="${x}">${x}%</button>`).join('')}</div></div>` : '';
-  const payBlock = ps.toPay > 0 ? `
-    <div class="pays" role="group" aria-label="Способ оплаты" style="grid-template-columns:repeat(2,minmax(0,1fr))">${[['cash', 'Наличные'], ['card', 'Карта'], ['debt', 'В долг'], ['split', 'Частями']].map(([m, t]) => `<button type="button" data-pay="${m}" class="${K.pay === m ? 'on' : ''}" aria-pressed="${K.pay === m}">${t}</button>`).join('')}</div>
-    ${K.pay === 'cash' ? `<label class="field"><span>Получено от клиента</span><input class="input" id="recv" type="number" min="0" step="0.01" value="${esc(K.received)}" placeholder="${num(ps.toPay)}"></label>${ps.change ? `<div class="ok-msg">Сдача: ${money(ps.change)}</div>` : ''}` : ''}
-    ${K.pay === 'split' ? `<div class="two" style="display:grid;grid-template-columns:repeat(${c ? 3 : 2},minmax(0,1fr));gap:8px">
-      ${['cash', 'card'].concat(c ? ['debt'] : []).map(m => `<label class="field"><span>${PAY[m]}</span><input class="input" data-split="${m}" type="number" min="0" step="0.01" value="${esc(K.split[m])}"></label>`).join('')}</div>
-      <div class="note ${ps.given === ps.toPay ? 'good' : 'bad'}">${ps.given === ps.toPay ? 'Сумма сходится' : ps.given < ps.toPay ? `Осталось распределить ${money(ps.toPay - ps.given)}` : `Больше суммы на ${money(ps.given - ps.toPay)}`}</div>` : ''}
-    ${ps.usesDebt && !c ? '<span class="bad note">Для продажи в долг выберите клиента.</span>' : ''}
-    ${ps.usesDebt && c ? `<label class="field"><span>Вернуть долг до</span><input class="input" id="kDue" type="date" value="${esc(K.due || iso(addDays(new Date(), S.company.debt_days_default || 30)))}"></label>` : ''}` : '';
-  const blocked = !!K.qErr || (ps.usesDebt && !c) || (ps.toPay > 0 && ps.given !== ps.toPay);
-  return `<div class="tape" style="display:grid;gap:14px">
-    <div class="head" style="align-items:center"><h2>${K.exchange ? `Обмен по чеку №${K.exchange.sale.number}` : 'Новый чек'}</h2>${K.cart.length || K.exchange ? `<button class="btn link sm" style="color:var(--red-t)" type="button" data-clear>${K.exchange ? 'Отменить обмен' : 'Очистить'}</button>` : ''}</div>
-    ${K.exchange ? `<div class="ok-msg" style="background:var(--blue-soft);color:var(--blue)">Возвращается: ${esc(K.exchange.items.map(i => `${i.name} × ${num(i.qty)}`).join(', '))}. В зачёт: ${money(K.exchange.credit)}. Выберите новые товары.</div>` : ''}
-    ${K.exchange ? (c ? `<div class="client-box"><span class="avatar">${esc(initials(c.name))}</span><b style="flex:1">${esc(c.name)}</b></div>` : '')
-      : c ? `<div class="client-box"><span class="avatar">${esc(initials(c.name))}</span><span style="flex:1;line-height:1.3"><b>${esc(c.name)}</b><br><small class="muted">${esc(c.phone || '')}${+c.bonus_balance ? ` · бонусы ${num(c.bonus_balance)}` : ''}${+c.debt_balance ? ` · <span class="bad">долг ${num(c.debt_balance)}</span>` : ''}</small></span><button class="btn link sm" type="button" data-unclient>Убрать</button></div>`
-      : `<div class="dd"><div class="search" style="min-height:46px;border-style:dashed"><span aria-hidden="true">👤</span><input id="cSearch" placeholder="Клиент: имя или телефон (J)" autocomplete="off" aria-label="Найти клиента"></div><div class="dd-list" id="cList" hidden></div></div>`}
-    ${sellerSel}
-    ${hasWholesale() && !K.exchange ? `<label class="check"><input type="checkbox" id="kWholesale" ${K.wholesale ? 'checked' : ''}> Оптовые цены</label>` : ''}
-    <div>${K.cart.length ? lines : '<p class="empty mono" style="padding:16px 0">Чек пустой. Отсканируйте штрихкод или выберите товар слева. Клавиша «/» — поиск.</p>'}</div>
-    ${K.cart.length ? `
-    <div class="mono note" style="display:grid;gap:3px">
-      <div style="display:flex;justify-content:space-between"><span>Без скидок</span><span>${num(q?.subtotal)}</span></div>
-      <div style="display:flex;justify-content:space-between"><span>Скидка</span><span>${q?.discount ? '−' + num(q.discount) : '0'}</span></div>
-      ${K.exchange ? `<div style="display:flex;justify-content:space-between"><span>Зачёт по обмену</span><span>−${num(Math.min(K.exchange.credit, ps.total))}</span></div>` : ''}</div>
-    ${discBlock}
-    ${K.exchange ? '' : `<div style="display:flex;gap:8px"><input class="input" id="promo" placeholder="Промокод" value="${esc(K.promo)}" style="min-height:40px;text-transform:uppercase" aria-label="Промокод"><button class="btn ghost sm" type="button" data-promo>Применить</button></div>`}
-    ${K.qErr ? `<div class="err">${esc(K.qErr)}</div>` : ''}
-    ${!K.exchange && c && ps.bonusMax > 0 ? `<label class="field"><span>Оплатить бонусами (до ${num(ps.bonusMax)})</span><input class="input" id="bonus" type="number" min="0" step="0.01" max="${ps.bonusMax}" value="${esc(K.bonus)}"></label>` : ''}
-    ${K.noteOpen || K.note ? `<label class="field"><span>Заметка к чеку</span><textarea class="input" id="kNote" style="min-height:60px">${esc(K.note)}</textarea></label>` : '<button class="btn link sm" type="button" data-noteopen style="justify-self:start">+ Добавить заметку</button>'}
-    <div class="total"><span style="font-weight:600">${ps.refund ? 'Вернуть клиенту' : 'К оплате'}</span><b class="num">${num(ps.refund || ps.toPay)}</b></div>
-    ${payBlock}
-    ${ps.refund ? `<div class="pays" style="grid-template-columns:repeat(2,minmax(0,1fr))">${['cash', 'card'].map(m => `<button type="button" data-refund="${m}" class="${(K.refundMethod || 'cash') === m ? 'on' : ''}">${m === 'cash' ? 'Вернуть наличными' : 'Вернуть на карту'}</button>`).join('')}</div>` : ''}
-    <button class="btn big" type="button" data-sell ${blocked ? 'disabled' : ''}>${K.exchange ? 'Провести обмен' : 'Принять оплату'} <small style="opacity:.7">(L)</small></button>
-    ${K.exchange ? '' : '<button class="btn link" type="button" data-hold>Отложить чек (O)</button>'}` : ''}
-    ${K.done ? `<div class="ok-msg" role="status">${esc(K.done)}</div>${K.lastSale ? '<button class="btn ghost" type="button" data-print>Печать чека</button>' : ''}` : ''}
+  const discOn = +K.disc > 0, sellerName = K.sellers.find(s => s.id === K.seller)?.name;
+  const panel = K.panel === 'disc' ? `<div class="field"><span>Ручная скидка</span><div style="display:flex;gap:6px;align-items:center"><input class="input" id="kDisc" type="number" min="0" step="0.01" value="${esc(K.disc)}" placeholder="0">
+      <div class="seg"><button type="button" data-dt="%" class="${K.discType === '%' ? 'on' : ''}">%</button><button type="button" data-dt="sum" class="${K.discType === 'sum' ? 'on' : ''}">${esc(S.company.currency || 'сумма')}</button></div></div>
+      <div class="chips">${[5, 10, 15, 30, 50].map(x => `<button type="button" class="chip" data-quick="${x}">${x}%</button>`).join('')}${discOn ? '<button type="button" class="chip" data-quick="0">Убрать</button>' : ''}</div></div>`
+    : K.panel === 'promo' ? `<div style="display:flex;gap:6px"><input class="input" id="promo" placeholder="Промокод" value="${esc(K.promo)}" style="text-transform:uppercase" aria-label="Промокод"><button class="btn ghost" type="button" data-promo>Применить</button></div>`
+    : K.panel === 'note' ? `<textarea class="input" id="kNote" placeholder="Заметка к чеку" style="min-height:56px">${esc(K.note)}</textarea>`
+    : K.panel === 'seller' ? `<select class="input" id="kSeller" aria-label="Продавец">${opts(K.sellers, K.seller)}</select>` : '';
+  return `<div class="cart">
+    <div class="cart-h"><div class="t"><h2>${K.exchange ? 'Новые товары' : 'Чек'} ${n ? `<span class="muted" style="font-weight:500">· ${num(n)} шт</span>` : ''}</h2>
+      ${K.cart.length || K.exchange ? `<button class="btn link sm" style="color:var(--red)" type="button" data-clear>${K.exchange ? 'Отменить обмен' : 'Очистить'}</button>` : ''}</div>
+      ${K.exchange ? `<div class="ok-msg" style="background:var(--accent-soft);color:var(--accent-ink)">Возврат: ${esc(K.exchange.items.map(i => `${i.name} × ${num(i.qty)}`).join(', '))} — в зачёт ${money(K.exchange.credit)}</div>` : ''}
+      ${c ? `<div class="client-box"><span class="avatar">${esc(initials(c.name))}</span><span style="flex:1;line-height:1.3"><b>${esc(c.name)}</b><br><small class="muted">${esc(c.phone || '')}${+c.bonus_balance ? ` · бонусы ${num(c.bonus_balance)}` : ''}${+c.debt_balance ? ` · <span class="bad">долг ${num(c.debt_balance)}</span>` : ''}</small></span>${K.exchange ? '' : '<button class="x" type="button" data-unclient aria-label="Убрать клиента">×</button>'}</div>`
+        : `<div class="dd"><label class="search" style="height:34px;box-shadow:none">${ICON.user}<input id="cSearch" placeholder="Клиент — имя или телефон" autocomplete="off" aria-label="Найти клиента"><kbd>J</kbd></label><div class="dd-list" id="cList" hidden></div></div>`}
+      ${K.exchange ? '' : `<div class="opts">
+        ${K.sellers.length > 1 ? `<button type="button" class="opt ${K.panel === 'seller' ? 'on' : ''}" data-panel="seller">${ICON.user}${esc(sellerName || 'Продавец')}</button>` : ''}
+        ${can('sales.discount') ? `<button type="button" class="opt ${discOn || K.panel === 'disc' ? 'on' : ''}" data-panel="disc">${ICON.percent}${discOn ? `Скидка ${num(K.disc)}${K.discType === '%' ? '%' : ''}` : 'Скидка'}</button>` : ''}
+        <button type="button" class="opt ${K.promo || K.panel === 'promo' ? 'on' : ''}" data-panel="promo">${ICON.tag}${K.promo ? esc(K.promo) : 'Промокод'}</button>
+        <button type="button" class="opt ${K.note || K.panel === 'note' ? 'on' : ''}" data-panel="note">${ICON.note}Заметка</button>
+        ${hasWholesale() ? `<label class="opt ${K.wholesale ? 'on' : ''}" style="cursor:pointer"><span class="switch" style="transform:scale(.8)"><input type="checkbox" id="kWholesale" ${K.wholesale ? 'checked' : ''}><i></i></span>Опт</label>` : ''}
+      </div>${panel}`}
+    </div>
+    <div class="cart-b">${K.cart.length ? lines : `<div class="empty" style="padding:28px 8px">${ICONS.kassa.replace('<svg', '<svg style="width:28px;height:28px;color:var(--faint)"')}<br>Добавьте товар: клик по карточке,<br>сканер штрихкода или <kbd>/</kbd> для поиска</div>`}</div>
+    ${K.cart.length ? `<div class="cart-f">
+      <div class="sumrow"><span>Без скидок</span><b>${num(q?.subtotal ?? t.total)}</b></div>
+      ${q?.discount ? `<div class="sumrow"><span>Скидка</span><b class="good">−${num(q.discount)}</b></div>` : ''}
+      ${K.exchange ? `<div class="sumrow"><span>Зачёт по обмену</span><b>−${num(Math.min(t.credit, t.total))}</b></div>` : ''}
+      ${K.qErr ? `<div class="err">${esc(K.qErr)}</div>` : ''}
+      <div class="total"><span style="font-weight:600">${t.refund ? 'Вернуть клиенту' : 'Итого'}</span><b>${num(t.refund || t.toPay)}</b></div>
+      <button class="btn big" type="button" data-pay ${K.qErr ? 'disabled' : ''}>${K.exchange ? 'Провести обмен' : `Оплатить ${money(t.toPay)}`} <span class="k">L</span></button>
+      ${K.exchange ? '' : `<button class="btn ghost" type="button" data-hold>${ICON.pause}Отложить <span class="k">O</span></button>`}
+    </div>` : ''}
   </div>`;
-}
-function drawKassa(v) {
-  v.innerHTML = `<div class="head"><div><h1>Касса</h1><p class="sub">${esc(S.stores.find(s => s.id === S.storeId)?.name || '')} · клавиши: / поиск, J клиент, K скидка, L оплатить, O отложить</p></div>
-    <div style="display:flex;gap:10px;flex-wrap:wrap"><button class="btn ghost" type="button" data-held>Отложенные чеки</button>${can('sales.return') ? '<button class="btn ghost" type="button" data-returns>Возврат и обмен</button>' : ''}</div></div>
-  <div class="row"><section class="grow grid" aria-label="Товары">
-    <label class="search"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#5A6280" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
-      <input id="kq" placeholder="Название, артикул или отсканируйте штрихкод" value="${esc(K.q)}" autocomplete="off" aria-label="Поиск товара"></label>
-    <div class="chips" role="group" aria-label="Категории"><button type="button" class="chip ${!K.cat ? 'on' : ''}" data-cat="">Все</button>${S.cats.map(c => `<button type="button" class="chip ${K.cat === String(c.id) ? 'on' : ''}" data-cat="${c.id}">${esc(c.name)}</button>`).join('')}</div>
-    <div id="tiles">${kassaTiles()}</div></section>
-    <aside class="aside" id="check" aria-label="Чек">${kassaCheck()}</aside></div>`;
-  cartBar();
 }
 function cartBar() {
   $('.cartbar')?.remove(); $('#view')?.classList.remove('has-cartbar');
   if (!K.cart.length || !$('#check')) return;
-  const n = K.cart.reduce((a, l) => a + l.qty, 0), total = K.quote?.total ?? K.cart.reduce((a, l) => a + l.qty * priceOf(l.p), 0);
+  const n = K.cart.reduce((a, l) => a + l.qty, 0);
   const bar = document.createElement('div'); bar.className = 'cartbar';
-  bar.innerHTML = `<span>${num(n)} ${plural(Math.round(n), 'товар', 'товара', 'товаров')} · <b class="num">${money(total)}</b></span><button class="btn sm" type="button">К чеку</button>`;
+  bar.innerHTML = `<span>${num(n)} ${plural(Math.round(n), 'товар', 'товара', 'товаров')} · <b class="num">${money(totals().toPay)}</b></span><button class="btn sm" type="button">К чеку</button>`;
   bar.querySelector('button').onclick = () => $('#check').scrollIntoView({ behavior: 'smooth' });
   $('#view').append(bar); $('#view').classList.add('has-cartbar');
 }
-const redrawCheck = () => { cartBar(); const el = $('#check'); if (el) { const f = document.activeElement; const id = f?.id, sp = f?.dataset?.split; el.innerHTML = kassaCheck(); const x = id ? $('#' + id) : sp ? $(`[data-split="${sp}"]`) : null; if (x) { x.focus(); try { const n = x.value.length; x.setSelectionRange(n, n); } catch { /* number */ } } } };
-const discBody = () => {
-  const d = +K.disc || 0; if (!d) return {};
-  return K.discType === '%' ? { manual_discount_percent: Math.min(100, d) } : { manual_discount_amount: d };
+const redrawCheck = () => {
+  cartBar(); const el = $('#check'); if (!el) return;
+  const f = document.activeElement, id = f?.id;
+  el.innerHTML = kassaCart();
+  const x = id ? $('#' + id) : null;
+  if (x && x !== document.body) { x.focus(); try { const n = x.value.length; x.setSelectionRange(n, n); } catch { /* number */ } }
 };
+const discBody = () => { const d = +K.disc || 0; if (!d) return {}; return K.discType === '%' ? { manual_discount_percent: Math.min(100, d) } : { manual_discount_amount: d }; };
 const requote = debounce(async () => {
   if (!K.cart.length) { K.quote = null; K.qErr = ''; redrawCheck(); return; }
-  const client = K.exchange ? K.exchange.client : K.client;
   try {
-    K.quote = await api('/api/sales/quote', { method: 'POST', body: { store_id: S.storeId, client_id: client?.id, promo_code: K.exchange ? null : (K.promo || null),
+    K.quote = await api('/api/sales/quote', { method: 'POST', body: { store_id: S.storeId, client_id: checkClient()?.id, promo_code: K.exchange ? null : (K.promo || null),
       wholesale: K.exchange ? false : K.wholesale, ...(K.exchange ? {} : discBody()), items: K.cart.map(l => ({ product_id: l.p.id, qty: l.qty })) } });
     K.qErr = '';
   } catch (e) { K.qErr = e.message; }
   redrawCheck();
-}, 200);
+}, 180);
 function addToCart(p) {
+  if (!p) return;
   const l = K.cart.find(x => x.p.id === p.id);
   if (l) l.qty += 1; else K.cart.push({ p, qty: 1 });
-  K.done = null; K.lastSale = null; redrawCheck(); requote();
+  redrawCheck(); drawTiles(); requote();
 }
 function resetCheck() {
-  Object.assign(K, { cart: [], client: null, promo: '', bonus: '', received: '', quote: null, qErr: '', pay: 'cash', split: { cash: '', card: '', debt: '' },
-    disc: '', note: '', noteOpen: false, due: '', exchange: null, wholesale: false, refundMethod: 'cash' });
+  Object.assign(K, { cart: [], client: null, promo: '', quote: null, qErr: '', disc: '', note: '', panel: null, exchange: null, wholesale: false, sel: -1 });
+  Object.assign(PS, { method: 'cash', received: '', split: { cash: '', card: '', debt: '' }, due: '', bonus: '', refund: 'cash' });
 }
 function bindKassa(v) {
   const searchClients = debounce(async q => {
@@ -496,109 +625,191 @@ function bindKassa(v) {
     if (!q.trim()) { box.hidden = true; return; }
     const r = await api('/api/clients' + qs({ q, size: 8 })).catch(() => ({ items: [] }));
     box.innerHTML = r.items.map(c => `<button type="button" data-client='${esc(JSON.stringify(c))}'><b>${esc(c.name)}</b> <span class="muted">${esc(c.phone || '')}</span></button>`).join('') +
-      (can('clients.write') ? `<button type="button" data-newclient="${esc(q)}">+ Новый клиент «${esc(q)}»</button>` : '');
+      (can('clients.write') ? `<button type="button" data-newclient="${esc(q)}">${ICON.plus.replace('<svg', '<svg style="width:14px;height:14px;vertical-align:-2px"')} Новый клиент «${esc(q)}»</button>` : '') || '<div class="empty" style="padding:10px">Не найдено</div>';
     box.hidden = false;
-  }, 250);
+  }, 220);
   const reDisc = debounce(() => requote(), 300);
   v.oninput = e => {
     const t = e.target;
-    if (t.id === 'kq') { K.q = t.value; $('#tiles').innerHTML = kassaTiles(); }
+    if (t.id === 'kq') { K.q = t.value; K.sel = t.value.trim() ? 0 : -1; drawTiles(); }
     if (t.id === 'cSearch') searchClients(t.value);
-    if (t.id === 'recv') { K.received = t.value; redrawCheck(); }
-    if (t.id === 'bonus') { K.bonus = t.value; redrawCheck(); }
     if (t.id === 'promo') K.promo = t.value.trim().toUpperCase();
     if (t.id === 'kDisc') { K.disc = t.value; reDisc(); }
     if (t.id === 'kNote') K.note = t.value;
-    if (t.dataset.split) { K.split[t.dataset.split] = t.value; redrawCheck(); }
   };
   v.onchange = e => {
     const t = e.target, i = t.dataset.qty;
-    if (i != null) { const q = nOrNull(t.value); if (q > 0) K.cart[i].qty = q; else K.cart.splice(i, 1); redrawCheck(); requote(); }
-    if (t.id === 'kSeller') K.seller = +t.value;
-    if (t.id === 'kWholesale') { K.wholesale = t.checked; $('#tiles').innerHTML = kassaTiles(); requote(); }
-    if (t.id === 'kDue') K.due = t.value;
+    if (i != null) { const q = nOrNull(t.value); if (q > 0) K.cart[i].qty = q; else K.cart.splice(i, 1); redrawCheck(); drawTiles(); requote(); }
+    if (t.id === 'kSeller') { K.seller = +t.value; K.panel = null; redrawCheck(); }
+    if (t.id === 'kWholesale') { K.wholesale = t.checked; drawTiles(); requote(); }
   };
   v.onkeydown = async e => {
-    if (e.target.id === 'kq' && e.key === 'Enter') {
-      e.preventDefault();
-      const code = K.q.trim(); if (!code) return;
-      let p = K.products.find(x => x.barcode === code || x.sku === code);
-      if (!p) { const vis = K.products.filter(x => x.name.toLowerCase().includes(code.toLowerCase())); if (vis.length === 1) p = vis[0]; }
-      if (!p) { try { p = await api('/api/products/barcode/' + encodeURIComponent(code)); } catch { toast(`Товар «${code}» не найден`, true); return; } }
-      addToCart(p); K.q = ''; e.target.value = ''; $('#tiles').innerHTML = kassaTiles();
+    if (e.target.id === 'kq') {
+      const list = visibleProducts(), cols = Math.max(1, Math.round(($('#tiles .tiles')?.clientWidth || 600) / 160));
+      if (['ArrowDown', 'ArrowUp', 'ArrowRight', 'ArrowLeft'].includes(e.key) && list.length) {
+        e.preventDefault();
+        const step = { ArrowDown: cols, ArrowUp: -cols, ArrowRight: 1, ArrowLeft: -1 }[e.key];
+        K.sel = Math.max(0, Math.min(list.length - 1, (K.sel < 0 ? 0 : K.sel + step)));
+        drawTiles(); $('#tiles .tile.sel')?.scrollIntoView({ block: 'nearest' }); return;
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const code = K.q.trim();
+        let p = code ? K.products.find(x => x.barcode === code || x.sku === code) : null;
+        if (!p && K.sel >= 0) p = list[K.sel];
+        if (!p && code) { try { p = await api('/api/products/barcode/' + encodeURIComponent(code)); } catch { toast(`Товар «${code}» не найден`, true); return; } }
+        if (p) { addToCart(p); K.q = ''; K.sel = -1; e.target.value = ''; drawTiles(); }
+      }
+      if (e.key === 'Escape') { K.q = ''; K.sel = -1; e.target.value = ''; e.target.blur(); drawTiles(); }
     }
-    if (e.target.id === 'promo' && e.key === 'Enter') { e.preventDefault(); requote(); }
+    if (e.target.id === 'promo' && e.key === 'Enter') { e.preventDefault(); K.panel = null; requote(); }
   };
   v.onclick = async e => {
     const t = e.target.closest('button,a'); if (!t) return;
     const d = t.dataset;
     if (d.add) addToCart(K.products.find(p => p.id === +d.add));
-    else if (d.cat != null) { K.cat = d.cat; $$('.chip[data-cat]', v).forEach(c => c.classList.toggle('on', c.dataset.cat === d.cat)); $('#tiles').innerHTML = kassaTiles(); }
-    else if (d.inc) { K.cart[d.inc].qty += 1; redrawCheck(); requote(); }
-    else if (d.dec) { const l = K.cart[d.dec]; l.qty -= 1; if (l.qty <= 0) K.cart.splice(d.dec, 1); redrawCheck(); requote(); }
-    else if ('clear' in d) { resetCheck(); K.done = null; redrawCheck(); }
-    else if (d.pay) { K.pay = d.pay; redrawCheck(); }
-    else if (d.refund) { K.refundMethod = d.refund; redrawCheck(); }
+    else if (d.cat != null) { K.cat = d.cat; K.sel = -1; $$('.chip[data-cat]', v).forEach(c => c.classList.toggle('on', c.dataset.cat === d.cat)); drawTiles(); }
+    else if (d.inc) { K.cart[d.inc].qty += 1; redrawCheck(); drawTiles(); requote(); }
+    else if (d.dec) { const l = K.cart[d.dec]; l.qty -= 1; if (l.qty <= 0) K.cart.splice(d.dec, 1); redrawCheck(); drawTiles(); requote(); }
+    else if ('clear' in d) { const ex = !!K.exchange; resetCheck(); ex ? route() : (redrawCheck(), drawTiles()); }
+    else if (d.panel) { K.panel = K.panel === d.panel ? null : d.panel; redrawCheck(); $({ disc: '#kDisc', promo: '#promo', note: '#kNote', seller: '#kSeller' }[K.panel] || '#none')?.focus(); }
     else if (d.dt) { K.discType = d.dt; redrawCheck(); requote(); }
-    else if (d.quick) { K.discType = '%'; K.disc = d.quick; redrawCheck(); requote(); }
-    else if ('noteopen' in d) { K.noteOpen = true; redrawCheck(); $('#kNote')?.focus(); }
-    else if ('promo' in d) requote();
-    else if (d.client) { K.client = JSON.parse(d.client); K.bonus = ''; redrawCheck(); requote(); }
-    else if ('unclient' in d) { K.client = null; K.bonus = ''; if (K.pay === 'debt') K.pay = 'cash'; K.split.debt = ''; redrawCheck(); requote(); }
+    else if (d.quick) { K.discType = '%'; K.disc = d.quick === '0' ? '' : d.quick; if (d.quick === '0') K.panel = null; redrawCheck(); requote(); }
+    else if ('promo' in d) { K.panel = null; requote(); }
+    else if (d.client) { K.client = JSON.parse(d.client); redrawCheck(); requote(); }
+    else if ('unclient' in d) { K.client = null; if (PS.method === 'debt') PS.method = 'cash'; redrawCheck(); requote(); }
     else if (d.newclient != null) clientModal(null, c => { K.client = c; redrawCheck(); requote(); }, { name: d.newclient });
-    else if ('sell' in d) sell(false);
-    else if ('hold' in d) sell(true);
+    else if ('pay' in d) openPay();
+    else if ('hold' in d) holdCheck();
     else if ('held' in d) heldModal();
     else if ('returns' in d) returnsModal();
-    else if ('print' in d && K.lastSale) printReceipt(K.lastSale);
   };
 }
-// горячие клавиши кассы (как в BILLZ)
+// горячие клавиши кассы (как в BILLZ): работают, когда фокус не в поле ввода
 document.addEventListener('keydown', e => {
-  if (location.hash !== '#kassa' || !$('#check') || $('.modal-bg')) return;
+  if (location.hash !== '#kassa' || !$('#check') || $('.modal-bg') || $('.cmdk-bg')) return;
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName);
   if (e.key === 'Escape' && typing) { document.activeElement.blur(); return; }
   if (typing || e.ctrlKey || e.metaKey || e.altKey) return;
   const k = e.key.toLowerCase();
-  const map = { '/': () => $('#kq')?.focus(), j: () => $('#cSearch')?.focus(), о: () => $('#cSearch')?.focus(), k: () => $('#kDisc')?.focus(), л: () => $('#kDisc')?.focus(),
-    l: () => $('[data-sell]:not(:disabled)')?.click(), д: () => $('[data-sell]:not(:disabled)')?.click(), o: () => $('[data-hold]')?.click(), щ: () => $('[data-hold]')?.click() };
+  const map = { '/': () => $('#kq')?.focus(), '.': () => $('#kq')?.focus(), j: () => $('#cSearch')?.focus(), о: () => $('#cSearch')?.focus(),
+    k: () => $('[data-panel=disc]')?.click(), л: () => $('[data-panel=disc]')?.click(),
+    l: () => $('[data-pay]:not(:disabled)')?.click(), д: () => $('[data-pay]:not(:disabled)')?.click(), o: () => $('[data-hold]')?.click(), щ: () => $('[data-hold]')?.click() };
   if (map[k]) { e.preventDefault(); map[k](); }
 });
-async function sell(hold) {
-  const q = K.quote; if (!q || !K.cart.length) return;
-  const ps = payState();
-  const btn = $(hold ? '[data-hold]' : '[data-sell]'); if (btn) btn.disabled = true;
-  const items = K.cart.map(l => ({ product_id: l.p.id, qty: l.qty }));
+async function holdCheck() {
+  if (!K.cart.length) return;
   try {
-    let sale, extra = '';
-    if (K.exchange) {
-      const r = await api(`/api/sales/${K.exchange.sale.id}/exchange`, { method: 'POST', body: {
-        return_items: K.exchange.items.map(i => ({ sale_item_id: i.sale_item_id, qty: i.qty })), items, seller_id: K.seller,
-        payments: ps.payments, refund_method: K.refundMethod || 'cash', comment: K.note || null } });
-      sale = r.sale; extra = r.refund ? `. Вернуть клиенту ${money(r.refund)} ${K.refundMethod === 'card' ? 'на карту' : 'наличными'}` : '';
-    } else {
-      sale = await api('/api/sales', { method: 'POST', body: {
-        store_id: S.storeId, client_id: K.client?.id, promo_code: K.promo || null, hold, items, seller_id: K.seller, wholesale: K.wholesale, ...discBody(),
-        comment: K.note || null, bonus_to_use: hold ? 0 : ps.bonus, payments: hold ? [] : ps.payments,
-        debt_due_date: ps.usesDebt ? (K.due || iso(addDays(new Date(), S.company.debt_days_default || 30))) : null } });
-    }
-    const change = !hold ? ps.change : 0;
-    const wasExchange = !!K.exchange;
-    resetCheck();
-    K.lastSale = hold ? null : sale;
-    K.done = hold ? `Чек №${sale.number} отложен. Найдёте его в «Отложенных чеках».`
-      : `${wasExchange ? 'Обмен проведён, новый чек' : 'Продажа'} №${sale.number}: ${money(sale.total)}${change ? `. Сдача ${money(change)}` : ''}${sale.bonus_earned ? `. Начислено бонусов: ${num(sale.bonus_earned)}` : ''}${extra}`;
-    const prods = await api('/api/products' + qs({ status: 'active', size: 500, store_id: S.storeId }));
-    K.products = prods.items; $('#tiles').innerHTML = kassaTiles(); redrawCheck();
-  } catch (e) { toast(e.message, true); if (btn) btn.disabled = false; }
+    const sale = await api('/api/sales', { method: 'POST', body: { store_id: S.storeId, client_id: K.client?.id, promo_code: K.promo || null, hold: true, seller_id: K.seller,
+      items: K.cart.map(l => ({ product_id: l.p.id, qty: l.qty })), wholesale: K.wholesale, ...discBody(), comment: K.note || null } });
+    resetCheck(); redrawCheck(); drawTiles(); toast(`Чек №${sale.number} отложен`);
+  } catch (e) { toast(e.message, true); }
+}
+// ----- экран оплаты -----
+function openPay() {
+  if (!K.cart.length || !K.quote) return;
+  Object.assign(PS, { received: '', split: { cash: '', card: '', debt: '' }, bonus: '' });
+  if (PS.method === 'debt' && !checkClient()) PS.method = 'cash';
+  const m = modal(K.exchange ? 'Обмен' : 'Оплата', '<div id="payBody"></div>');
+  const body = $('#payBody', m.el);
+  const st = () => {
+    const t = totals(), c = checkClient(), q = K.quote;
+    const bonusMax = K.exchange ? 0 : (q?.bonus_max_for_this_sale ?? 0), bonus = Math.min(+PS.bonus || 0, bonusMax);
+    const toPay = Math.max(0, +(t.toPay - bonus).toFixed(2));
+    let payments = [];
+    if (toPay > 0) payments = PS.method === 'split' ? ['cash', 'card', 'debt'].map(x => ({ method: x, amount: +(+PS.split[x] || 0).toFixed(2) })).filter(x => x.amount > 0) : [{ method: PS.method, amount: toPay }];
+    const given = +payments.reduce((a, x) => a + x.amount, 0).toFixed(2);
+    const usesDebt = payments.some(x => x.method === 'debt');
+    const change = PS.method === 'cash' && +PS.received > toPay ? +(+PS.received - toPay).toFixed(2) : 0;
+    const ok = !(usesDebt && !c) && (toPay === 0 || given === toPay) && !(PS.method === 'cash' && PS.received && +PS.received < toPay);
+    return { t, c, bonusMax, bonus, toPay, payments, given, usesDebt, change, ok };
+  };
+  const quick = v => { const r = [v]; for (const s of [5, 10, 50, 100, 500, 1000, 5000, 10000, 50000, 100000]) { const x = Math.ceil(v / s) * s; if (x > v && !r.includes(x)) r.push(x); if (r.length >= 4) break; } return r; };
+  const draw = () => {
+    const s = st();
+    body.innerHTML = `<div style="display:grid;gap:14px">
+      <div class="amount-display"><span class="muted">${s.t.refund ? 'Вернуть клиенту' : 'К оплате'}</span><b>${money(s.t.refund || s.toPay)}</b></div>
+      ${s.t.refund ? `<div class="pays">${['cash', 'card'].map(x => `<button type="button" data-refund="${x}" class="${PS.refund === x ? 'on' : ''}">${x === 'cash' ? 'Наличными' : 'На карту'}</button>`).join('')}</div>` : ''}
+      ${s.toPay > 0 ? `<div class="pays" role="group" aria-label="Способ оплаты">${[['cash', 'Наличные', ''], ['card', 'Карта', ''], ['debt', 'В долг', s.c ? '' : 'нужен клиент'], ['split', 'Частями', 'наличные + карта']].map(([x, t, h]) => `<button type="button" data-m="${x}" class="${PS.method === x ? 'on' : ''}" ${x === 'debt' && !s.c ? 'disabled' : ''}>${t}${h ? `<small>${h}</small>` : ''}</button>`).join('')}</div>` : ''}
+      ${s.toPay > 0 && PS.method === 'cash' ? `<div class="amount-display" style="background:var(--panel)"><span class="muted">Получено</span><b>${PS.received ? num(+PS.received) : '<span class="muted">—</span>'}</b></div>
+        <div class="chips">${quick(s.toPay).map((x, i) => `<button type="button" class="chip" data-q="${x}">${i ? num(x) : 'Без сдачи'}</button>`).join('')}</div>
+        <div class="keypad">${['1', '2', '3', '4', '5', '6', '7', '8', '9', '00', '0', '⌫'].map(k => `<button type="button" data-k="${k}" aria-label="${k === '⌫' ? 'Стереть' : k}">${k}</button>`).join('')}</div>
+        ${s.change ? `<div class="ok-msg" style="display:flex;justify-content:space-between;font-size:15px"><span>Сдача</span><b>${money(s.change)}</b></div>` : PS.received && +PS.received < s.toPay ? `<div class="err">Не хватает ${money(s.toPay - +PS.received)}</div>` : ''}` : ''}
+      ${s.toPay > 0 && PS.method === 'split' ? `<div class="form"><div class="two" style="grid-template-columns:repeat(${s.c ? 3 : 2},minmax(0,1fr))">${['cash', 'card'].concat(s.c ? ['debt'] : []).map(x => field(PAY[x], `<input class="input" data-split="${x}" type="number" min="0" step="0.01" value="${esc(PS.split[x])}">`)).join('')}</div>
+        <div class="note ${s.given === s.toPay ? 'good' : 'bad'}">${s.given === s.toPay ? 'Сумма сходится' : s.given < s.toPay ? `Осталось распределить ${money(s.toPay - s.given)}` : `Больше суммы на ${money(s.given - s.toPay)}`}</div></div>` : ''}
+      ${s.usesDebt && s.c ? field('Вернуть долг до', `<input class="input" id="pDue" type="date" value="${esc(PS.due || iso(addDays(new Date(), S.company.debt_days_default || 30)))}">`) : ''}
+      ${s.bonusMax > 0 ? field(`Списать бонусы (доступно ${num(s.bonusMax)})`, `<input class="input" id="pBonus" type="number" min="0" step="0.01" max="${s.bonusMax}" value="${esc(PS.bonus)}">`) : ''}
+      <div class="err" id="payErr" hidden></div>
+      <button class="btn big" type="button" data-confirm ${s.ok ? '' : 'disabled'}>${ICON.check}${K.exchange ? 'Провести обмен' : 'Провести продажу'} <span class="k">Enter</span></button>
+    </div>`;
+  };
+  const focusKeep = () => { const a = document.activeElement; return a && body.contains(a) && a.id ? '#' + a.id : a?.dataset?.split ? `[data-split="${a.dataset.split}"]` : null; };
+  const redraw = () => { const f = focusKeep(); draw(); const x = f ? $(f, body) : null; if (x) { x.focus(); try { const n = x.value.length; x.setSelectionRange(n, n); } catch { /* number */ } } else $('[data-confirm]', body)?.focus(); };
+  const press = k => { if (k === '⌫') PS.received = PS.received.slice(0, -1); else if (PS.received.length < 12) PS.received = (PS.received === '0' ? '' : PS.received) + k; redraw(); };
+  let done = false;
+  const confirm = async () => {
+    const s = st(); if (!s.ok || done) return;
+    const btn = $('[data-confirm]', body); btn.disabled = true;
+    const items = K.cart.map(l => ({ product_id: l.p.id, qty: l.qty }));
+    try {
+      let sale, refund = 0;
+      if (K.exchange) {
+        const r = await api(`/api/sales/${K.exchange.sale.id}/exchange`, { method: 'POST', body: { return_items: K.exchange.items.map(i => ({ sale_item_id: i.sale_item_id, qty: i.qty })), items,
+          seller_id: K.seller, payments: s.payments, refund_method: PS.refund, comment: K.note || null } });
+        sale = r.sale; refund = r.refund;
+      } else {
+        sale = await api('/api/sales', { method: 'POST', body: { store_id: S.storeId, client_id: K.client?.id, promo_code: K.promo || null, items, seller_id: K.seller, wholesale: K.wholesale, ...discBody(),
+          comment: K.note || null, bonus_to_use: s.bonus, payments: s.payments, debt_due_date: s.usesDebt ? (PS.due || iso(addDays(new Date(), S.company.debt_days_default || 30))) : null } });
+      }
+      done = true;
+      const ex = !!K.exchange;
+      resetCheck();
+      $('.modal-h h2', m.el).textContent = 'Готово';
+      body.innerHTML = `<div class="done-screen"><div class="check-ic">${ICON.check}</div>
+        <div><h2 style="font-size:18px">${ex ? 'Обмен проведён' : 'Оплачено'} · чек №${sale.number}</h2><p class="sub">${money(sale.total)}${sale.bonus_earned ? ` · начислено бонусов ${num(sale.bonus_earned)}` : ''}</p></div>
+        ${s.change ? `<div><div class="muted">Сдача</div><div class="change">${money(s.change)}</div></div>` : ''}
+        ${refund ? `<div><div class="muted">Вернуть клиенту ${PS.refund === 'card' ? 'на карту' : 'наличными'}</div><div class="change">${money(refund)}</div></div>` : ''}
+        <div style="display:grid;gap:8px;width:100%"><button class="btn big" type="button" data-next>Новая продажа <span class="k">Enter</span></button><button class="btn ghost" type="button" data-print>${ICON.print}Печать чека</button></div></div>`;
+      $('[data-print]', body).onclick = () => printReceipt(sale);
+      $('[data-next]', body).onclick = () => m.close();
+      $('[data-next]', body).focus();
+      api('/api/products' + qs({ status: 'active', size: 500, store_id: S.storeId })).then(r => { K.products = r.items; if (ex) route(); else { drawTiles(); redrawCheck(); } });
+      refreshBadges();
+    } catch (x) { const er = $('#payErr', body); er.textContent = x.message; er.hidden = false; btn.disabled = false; }
+  };
+  body.addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.m) { PS.method = b.dataset.m; redraw(); }
+    else if (b.dataset.k) press(b.dataset.k);
+    else if (b.dataset.q) { PS.received = String(b.dataset.q); redraw(); }
+    else if (b.dataset.refund) { PS.refund = b.dataset.refund; redraw(); }
+    else if ('confirm' in b.dataset) confirm();
+  });
+  body.addEventListener('input', e => {
+    if (e.target.dataset.split) { PS.split[e.target.dataset.split] = e.target.value; redraw(); }
+    if (e.target.id === 'pBonus') { PS.bonus = e.target.value; redraw(); }
+    if (e.target.id === 'pDue') PS.due = e.target.value;
+  });
+  const onKey = e => {
+    if (!m.el.isConnected) { document.removeEventListener('keydown', onKey); return; }
+    if (e.key === 'Escape') return;
+    const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName);
+    if (e.key === 'Enter' && !(e.target.tagName === 'BUTTON' && !e.target.dataset.next && !e.target.dataset.confirm)) { e.preventDefault(); done ? m.close() : confirm(); return; }
+    if (done || inField || PS.method !== 'cash') return;
+    if (/^[0-9]$/.test(e.key)) { e.preventDefault(); press(e.key); }
+    else if (e.key === 'Backspace') { e.preventDefault(); press('⌫'); }
+  };
+  document.addEventListener('keydown', onKey);
+  draw();
+  setTimeout(() => $('[data-confirm]', body)?.focus(), 40);
 }
 async function heldModal() {
   const list = await api('/api/sales/held' + qs({ store_id: S.storeId }));
-  const m = modal('Отложенные чеки', list.length ? list.map(s => `<div class="rcpt" style="font-size:14px">
-    <div class="t"><span>№${s.number} · ${fDateTime(s.created_at)}</span><b>${money(s.total)}</b></div>
-    <div class="t"><span>${esc(s.items.map(i => `${i.name} × ${num(i.qty)}`).join(', '))}</span></div>
+  const m = modal('Отложенные чеки', list.length ? list.map(s => `<div class="rcpt">
+    <div class="t"><span><b>№${s.number}</b> <span class="muted">· ${fDateTime(s.created_at)}</span></span><b>${money(s.total)}</b></div>
+    <div class="t"><span class="muted">${esc(s.items.map(i => `${i.name} × ${num(i.qty)}`).join(', '))}</span></div>
     ${s.comment ? `<div class="note">${esc(s.comment)}</div>` : ''}
-    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px"><button class="btn sm" data-paid="${s.id}" data-m="cash">Оплатить наличными</button><button class="btn sm" data-paid="${s.id}" data-m="card">Картой</button>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"><button class="btn sm" data-paid="${s.id}" data-m="cash">Наличными</button><button class="btn sm ghost" data-paid="${s.id}" data-m="card">Картой</button>
     ${s.client_id ? `<button class="btn sm ghost" data-paid="${s.id}" data-m="debt">В долг</button>` : ''}<button class="btn sm danger" data-cancel="${s.id}">Отменить</button></div></div>`).join('')
     : '<p class="empty">Отложенных чеков нет.</p>');
   m.body.onclick = async e => {
@@ -612,13 +823,12 @@ async function heldModal() {
     } catch (x) { toast(x.message, true); b.disabled = false; }
   };
 }
-// возврат и обмен прямо из кассы: поиск чека
 async function returnsModal() {
-  const m = modal('Возврат и обмен', `<label class="search" style="min-height:46px;margin-bottom:12px"><input id="rq" type="number" placeholder="Номер чека" aria-label="Номер чека"></label><div id="rlist"><div class="empty">Загружаю…</div></div>`, { wide: true });
-  const load = async num_ => {
-    const r = await api('/api/sales' + qs({ number: num_ || '', date_from: num_ ? '' : iso(addDays(new Date(), -13)), date_to: num_ ? '' : today(), size: 30, store_id: S.stores.length > 1 ? S.storeId : '' }));
-    $('#rlist', m.el).innerHTML = r.items.length ? r.items.map(s => `<div class="rcpt click" data-sale="${s.id}" style="cursor:pointer;font-size:14px"><div class="t"><span>№${s.number} · ${fDateTime(s.created_at)}</span><b>${money(s.total)}</b></div>
-      <div class="t"><span>${esc(s.items.map(i => i.name).slice(0, 3).join(', '))}</span><span class="muted">${s.items.reduce((a, i) => a + i.qty, 0)} ед.</span></div></div>`).join('') : '<p class="empty">Чеков не найдено</p>';
+  const m = modal('Возврат и обмен', `<label class="search" style="margin-bottom:12px">${ICON.search}<input id="rq" type="number" placeholder="Номер чека" aria-label="Номер чека"></label><p class="note" style="margin:0 0 8px">Чеки за последние 14 дней. Откройте чек, отметьте товары и выберите возврат или обмен.</p><div id="rlist"><div class="sk" style="height:180px"></div></div>`, { wide: true });
+  const load = async n => {
+    const r = await api('/api/sales' + qs({ number: n || '', date_from: n ? '' : iso(addDays(new Date(), -13)), date_to: n ? '' : today(), size: 30, store_id: S.stores.length > 1 ? S.storeId : '' }));
+    $('#rlist', m.el).innerHTML = r.items.length ? r.items.map(s => `<div class="rcpt" data-sale="${s.id}" style="cursor:pointer"><div class="t"><span><b>№${s.number}</b> <span class="muted">· ${fDateTime(s.created_at)}</span></span><b>${money(s.total)}</b></div>
+      <div class="t"><span class="muted">${esc(s.items.map(i => i.name).slice(0, 3).join(', '))}</span><span class="muted">${s.items.reduce((a, i) => a + i.qty, 0)} шт</span></div></div>`).join('') : '<p class="empty">Чеков не найдено</p>';
     $('#rlist', m.el).onclick = e => { const x = e.target.closest('[data-sale]'); if (x) { m.close(); saleModal(r.items.find(s => s.id === +x.dataset.sale)); } };
   };
   $('#rq', m.el).oninput = debounce(e => load(e.target.value), 300);
@@ -626,18 +836,15 @@ async function returnsModal() {
 }
 function startExchange(sale, items, client) {
   resetCheck();
-  const credit = +items.reduce((a, i) => a + i.amount, 0).toFixed(2);
-  K.exchange = { sale, items, credit, client };
-  K.done = null; K.lastSale = null;
+  K.exchange = { sale, items, credit: +items.reduce((a, i) => a + i.amount, 0).toFixed(2), client };
   if (location.hash === '#kassa') route(); else location.hash = '#kassa';
 }
-// печать чека
 function printReceipt(s) {
   const st = S.stores.find(x => x.id === s.store_id)?.name || '';
   const w = window.open('', '_blank', 'width=380,height=640');
   if (!w) { toast('Браузер заблокировал окно печати. Разрешите всплывающие окна для этого сайта', true); return; }
   w.document.write(`<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><title>Чек №${s.number}</title><style>
-    body{font:13px/1.45 "IBM Plex Mono",ui-monospace,Menlo,monospace;margin:0;padding:16px;width:280px;color:#000}
+    body{font:13px/1.45 "JetBrains Mono",ui-monospace,Menlo,monospace;margin:0;padding:16px;width:280px;color:#000}
     h1{font-size:16px;text-align:center;margin:0 0 2px}p{margin:0;text-align:center}.r{display:flex;justify-content:space-between;gap:8px}
     hr{border:0;border-top:1px dashed #000;margin:8px 0}.b{font-weight:700;font-size:15px}@media print{@page{margin:0}}</style></head><body>
     <h1>${esc(S.company.name)}</h1><p>${esc(st)}</p><p>Чек №${s.number}</p><p>${fDateTime(s.created_at)}</p><hr>
@@ -773,19 +980,22 @@ async function viewProducts(v) {
       ${can('products.write') ? '<button class="btn" data-a="new">Новый товар</button>' : ''}</div></div>
   <div class="chips">${tabs.map(([k, t, n]) => `<button class="chip ${P.status === k ? 'on' : ''}" data-status="${k}">${t}<small>${n}</small></button>`).join('')}</div>
   <div class="panel"><div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px">
-    <label class="search" style="flex:1 1 280px;min-height:44px"><input id="pq" placeholder="Название, артикул или штрихкод" value="${esc(P.q)}" aria-label="Поиск"></label>
+    <label class="search" style="flex:1 1 280px">${ICON.search}<input id="pq" placeholder="Название, артикул или штрихкод" value="${esc(P.q)}" aria-label="Поиск"></label>
     <select class="input" id="pcat" style="width:auto">${opts(S.cats, P.cat, 'id', 'name', 'Все категории')}</select></div>
     ${res.items.length ? `<div class="tbl-wrap"><table><thead><tr><th>Название</th><th>Артикул</th><th>Штрихкод</th><th>Категория</th><th class="r">Цена</th><th class="r">Себестоимость</th><th class="r">Остаток</th></tr></thead><tbody>
-    ${res.items.map(p => { const st = stockOf(p); return `<tr class="click" data-p="${p.id}" tabindex="0"><td><b>${esc(p.name)}</b>${p.is_active ? '' : ' <span class="tag grey">выключен</span>'}</td><td>${esc(p.sku || '—')}</td><td>${esc(p.barcode || '—')}</td><td>${esc(cn[p.category_id] || '—')}</td>
-      <td class="r">${money(p.retail_price)}</td><td class="r muted">${num(p.cost_price)}</td>
+    ${res.items.map(p => { const st = stockOf(p), ed = can('products.write'), ce = (f, v, ph = '—') => ed ? `<span class="cell-edit" data-edit="${f}" data-id="${p.id}" title="Нажмите, чтобы изменить">${v || ph}</span>` : (v || ph); return `<tr class="click" data-p="${p.id}" tabindex="0"><td><b>${ce('name', esc(p.name))}</b>${p.is_active ? '' : ' <span class="tag grey">выключен</span>'}</td><td>${esc(p.sku || '—')}</td><td>${ce('barcode', esc(p.barcode || ''))}</td><td>${esc(cn[p.category_id] || '—')}</td>
+      <td class="r">${ed && can('stock.manage') ? `<span class="cell-edit" data-edit="price" data-id="${p.id}" title="Нажмите, чтобы изменить цену">${money(p.retail_price)}</span>` : money(p.retail_price)}</td><td class="r muted">${num(p.cost_price)}</td>
       <td class="r">${p.is_service ? '<span class="tag grey">услуга</span>' : `<span class="tag ${st <= 0 ? 'red' : st <= +S.company.low_stock_threshold ? 'amber' : 'green'}">${num(st)} ${esc(p.unit)}</span>`}</td></tr>`; }).join('')}
     </tbody></table></div>${pager(res.total, P.page, 50)}`
     : `<p class="empty">${stats.all ? 'По этому фильтру товаров нет.' : 'Каталог пустой. Добавьте первый товар или загрузите список из CSV.'}</p>`}</div>`;
   const reload = debounce(() => { P.page = 1; route(); }, 350);
   v.oninput = e => { if (e.target.id === 'pq') { P.q = e.target.value; reload(); } };
   v.onchange = e => { if (e.target.id === 'pcat') { P.cat = e.target.value; P.page = 1; route(); } };
-  v.onkeydown = e => { const tr = e.target.closest('[data-p]'); if (tr && e.key === 'Enter') tr.click(); };
+  v.onkeydown = e => { const tr = e.target.closest('[data-p]'); if (tr && e.key === 'Enter' && e.target === tr) tr.click(); };
   v.onclick = e => {
+    const ce = e.target.closest('.cell-edit');
+    if (ce) { e.stopPropagation(); inlineEdit(ce, res.items.find(p => p.id === +ce.dataset.id)); return; }
+    if (e.target.closest('.cell-input')) return;
     const t = e.target.closest('[data-status],[data-page],[data-p],[data-a]'); if (!t) return;
     if (t.dataset.status) { P.status = t.dataset.status; P.page = 1; route(); }
     else if (t.dataset.page) { P.page = +t.dataset.page; route(); }
@@ -794,6 +1004,37 @@ async function viewProducts(v) {
     else if (t.dataset.a === 'stockin') stockInModal();
     else if (t.dataset.a === 'import') importModal();
   };
+}
+// правка прямо в ячейке: Enter — сохранить, Esc — отменить
+function inlineEdit(span, p) {
+  const f = span.dataset.edit, old = f === 'price' ? p.retail_price : (p[f] || '');
+  const input = document.createElement('input');
+  input.className = 'cell-input'; input.value = old; input.setAttribute('aria-label', { name: 'Название', barcode: 'Штрихкод', price: 'Цена' }[f]);
+  if (f === 'price') { input.type = 'number'; input.step = '0.01'; input.min = '0'; }
+  span.replaceWith(input); input.focus(); input.select();
+  let busy = false;
+  const finish = async save => {
+    if (busy) return; busy = true;
+    const val = input.value.trim();
+    if (!save || String(val) === String(old) || (f === 'name' && !val)) { input.replaceWith(span); return; }
+    input.disabled = true;
+    try {
+      if (f === 'price') {
+        const doc = await api('/api/stock/repricing', { method: 'POST', body: { items: [{ product_id: p.id, price: nOrNull(val) }] } });
+        await api(`/api/stock/repricing/${doc.id}/complete`, { method: 'POST' });
+        p.retail_price = nOrNull(val); span.textContent = money(p.retail_price);
+      } else {
+        const r = await api(`/api/products/${p.id}`, { method: 'PATCH', body: { [f]: val || null } });
+        p[f] = r[f]; span.textContent = r[f] || '—';
+      }
+      input.replaceWith(span);
+      const tr = span.closest('tr'); tr.classList.remove('saved'); void tr.offsetWidth; tr.classList.add('saved');
+      toast(f === 'price' ? `Новая цена ${money(p.retail_price)} — сохранено в истории переоценок` : 'Сохранено');
+    } catch (x) { toast(x.message, true); input.disabled = false; busy = false; input.focus(); }
+  };
+  input.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(e.key === 'Enter'); } });
+  input.addEventListener('click', e => e.stopPropagation());
+  input.addEventListener('blur', () => finish(true));
 }
 async function ensureCategory(d) {
   if (d.new_category?.trim()) { const c = await api('/api/categories', { method: 'POST', body: { name: d.new_category.trim() } }); S.cats.push(c); return c.id; }
@@ -890,7 +1131,7 @@ async function viewClients(v) {
     <div class="kpi"><span>Не возвращаются</span><b class="${stats.not_returning ? 'warn' : ''}">${stats.not_returning}</b><small class="muted">не покупали 60+ дней</small></div>
     <div class="kpi"><span>Дни рождения</span><b>${stats.birthdays}</b><small class="muted">в ближайшие 7 дней</small></div></div>
   <div class="panel"><div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:12px">
-    <label class="search" style="flex:1 1 280px;min-height:44px"><input id="cq" placeholder="Имя или телефон" value="${esc(C.q)}" aria-label="Поиск клиента"></label>
+    <label class="search" style="flex:1 1 280px">${ICON.search}<input id="cq" placeholder="Имя или телефон" value="${esc(C.q)}" aria-label="Поиск клиента"></label>
     <label class="check"><input type="checkbox" id="cdebt" ${C.debt ? 'checked' : ''}> Только должники</label></div>
     ${res.items.length ? `<div class="tbl-wrap"><table><thead><tr><th>Имя</th><th>Телефон</th><th>Группа</th><th>Пол</th><th class="r">Покупки</th><th class="r">Последняя</th><th class="r">Бонусы</th><th class="r">Долг</th></tr></thead><tbody>
     ${res.items.map(c => `<tr class="click" data-c="${c.id}" tabindex="0"><td><b>${esc(c.name)}</b> ${(c.tags || []).map(t => `<span class="tag grey">${esc(t)}</span>`).join(' ')}</td><td>${esc(c.phone || '—')}</td><td>${esc(gn[c.group_id] || '—')}</td>
@@ -1002,7 +1243,7 @@ async function viewDebts(v) {
     <div class="kpi"><span>Остаток долгов</span><b class="${sm.left ? 'bad' : ''}">${money(sm.left)}</b></div><div class="kpi"><span>Просрочено</span><b class="${sm.overdue ? 'bad' : ''}">${sm.overdue}</b><small class="muted">${plural(sm.overdue, 'долг', 'долга', 'долгов')}</small></div></div>` : ''}
   <div class="panel"><div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:12px">
     ${isPay ? '' : `<div class="chips">${[['all', 'Все'], ['overdue', 'Просроченные'], ['unpaid', 'Непогашенные'], ['partial', 'Частично'], ['paid', 'Погашенные']].map(([k, t]) => `<button class="chip ${DB.status === k ? 'on' : ''}" data-st="${k}">${t}${k !== 'all' && sm ? `<small>${sm[k]}</small>` : ''}</button>`).join('')}</div>`}
-    <label class="search" style="flex:1 1 220px;min-height:44px"><input id="dq" placeholder="Клиент или телефон" value="${esc(DB.q)}" aria-label="Поиск"></label>
+    <label class="search" style="flex:1 1 220px">${ICON.search}<input id="dq" placeholder="Клиент или телефон" value="${esc(DB.q)}" aria-label="Поиск"></label>
     ${!isPay && w ? `<button class="btn" data-mass ${DB.sel.size ? '' : 'disabled'}>Погасить выбранные${DB.sel.size ? ` (${DB.sel.size})` : ''}</button>` : ''}</div>
   ${isPay ? (data.items.length ? `<div class="tbl-wrap"><table><thead><tr><th>Дата</th><th>Клиент</th><th>Способ</th><th class="r">Сумма</th></tr></thead><tbody>${data.items.map(p => `<tr><td>${fDateTime(p.created_at)}</td><td>${esc(p.client_name)}</td><td>${p.method === 'return' ? '<span class="tag grey">возврат товара</span>' : PAY[p.method] || p.method}</td><td class="r good"><b>${money(p.amount)}</b></td></tr>`).join('')}</tbody></table></div>${pager(data.total, DB.page, 50)}` : '<p class="empty">Погашений пока не было.</p>')
     : data.items.length ? `<div class="tbl-wrap"><table><thead><tr>${w ? '<th></th>' : ''}<th>Клиент</th><th>Чек</th><th>Выдан</th><th>Вернуть до</th><th>Статус</th><th class="r">Сумма</th><th class="r">Остаток</th>${w ? '<th></th>' : ''}</tr></thead><tbody>

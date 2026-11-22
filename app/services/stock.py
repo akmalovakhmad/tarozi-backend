@@ -27,7 +27,8 @@ def change_stock(db: Session, *, company_id: int, product: Product, store_id: in
     level = get_level(db, product.id, store_id)
     new_qty = Decimal(level.qty) + Decimal(delta)
     if new_qty < 0 and not allow_negative:
-        raise HTTPException(409, f"Не хватает товара «{product.name}»: на складе {level.qty:g}, нужно {-Decimal(delta):g}")
+        have, need = Decimal(level.qty).normalize(), (-Decimal(delta)).normalize()
+        raise HTTPException(409, f"Не хватает товара «{product.name}»: на складе {have:f}, нужно {need:f}")
     level.qty = new_qty
     db.add(StockMovement(company_id=company_id, product_id=product.id, store_id=store_id, delta=delta,
                          reason=reason, ref_id=ref_id, user_id=user_id))
