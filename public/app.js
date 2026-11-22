@@ -330,10 +330,51 @@ function renderAuth(mode = 'login') {
 }
 
 // ---------- периоды ----------
-const PERIODS = { today: ['Сегодня', 0], week: ['Неделя', 6], month: ['Месяц', 29], quarter: ['Квартал', 89], year: ['Год', 364] };
+const PERIODS = { today: ['Сегодня', 0], week: ['Неделя', 6], month: ['Месяц', 29], quarter: ['Квартал', 89], year: ['Год', 364], custom: ['Свой период', 0] };
 function periodRange(key, shift = 0) {
   const days = PERIODS[key][1] + 1, end = addDays(new Date(), -shift * days);
   return { from: iso(addDays(end, -(days - 1))), to: iso(end) };
+}
+// свой диапазон дат: состояние раздела хранит period ('custom') и from/to
+const PRESETS = { this_month: 'Этот месяц', last_month: 'Прошлый месяц', ytd: 'С начала года', last_90: '90 дней' };
+function presetRange(k) {
+  const n = new Date(), y = n.getFullYear(), m = n.getMonth();
+  if (k === 'this_month') return { from: iso(new Date(y, m, 1)), to: today() };
+  if (k === 'last_month') return { from: iso(new Date(y, m - 1, 1)), to: iso(new Date(y, m, 0)) };
+  if (k === 'ytd') return { from: `${y}-01-01`, to: today() };
+  return { from: iso(addDays(n, -89)), to: today() };
+}
+function rangeOf(st) {
+  if (st.period !== 'custom') return periodRange(st.period);
+  return { from: st.from || iso(addDays(new Date(), -29)), to: st.to || today() };
+}
+const fLong = d => new Date(d + 'T00:00').toLocaleDateString('ru-RU', { day: 'numeric', month: 'short', year: 'numeric' });
+const fRange = r => r.from === r.to ? fLong(r.from) : `${fLong(r.from)} — ${fLong(r.to)}`;
+function rangeControls(st, keys) {
+  const r = rangeOf(st);
+  return `<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">${segPeriods(st.period, [...keys, 'custom'])}
+    ${st.period === 'custom' ? `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+      <input class="input" type="date" data-range="from" value="${r.from}" max="${today()}" aria-label="Начало периода" style="width:auto;height:30px">
+      <span class="muted">—</span>
+      <input class="input" type="date" data-range="to" value="${r.to}" max="${today()}" aria-label="Конец периода" style="width:auto;height:30px">
+      ${Object.entries(PRESETS).map(([k, t]) => `<button type="button" class="chip" data-preset="${k}">${t}</button>`).join('')}</div>` : ''}</div>`;
+}
+// обработка кликов и изменений дат; возвращает true, если событие про период
+function rangeEvent(st, e) {
+  const pb = e.target.closest?.('[data-period]');
+  if (pb && e.type === 'click') {
+    if (pb.dataset.period === 'custom' && st.period !== 'custom') { const r = rangeOf(st); st.from = r.from; st.to = r.to; }
+    st.period = pb.dataset.period; return true;
+  }
+  const pr = e.target.closest?.('[data-preset]');
+  if (pr && e.type === 'click') { Object.assign(st, { period: 'custom' }, presetRange(pr.dataset.preset)); return true; }
+  const d = e.target.dataset?.range;
+  if (d && e.type === 'change' && e.target.value) {
+    st[d] = e.target.value;
+    if (st.from && st.to && st.from > st.to) [st.from, st.to] = [st.to, st.from];
+    return true;
+  }
+  return false;
 }
 const segPeriods = (cur, keys = Object.keys(PERIODS)) => `<div class="seg" role="group" aria-label="Период">${keys.map(k =>
   `<button type="button" data-period="${k}" class="${k === cur ? 'on' : ''}" aria-pressed="${k === cur}">${PERIODS[k][0]}</button>`).join('')}</div>`;
@@ -858,9 +899,9 @@ function printReceipt(s) {
 }
 
 // ================= ПРОДАЖИ =================
-const SL = { period: 'today', status: 'completed', page: 1, num: '' };
+const SL = { period: 'today', status: 'completed', page: 1, num: '', from: '', to: '' };
 async function viewSales(v) {
-  const r = periodRange(SL.period);
+  const r = rangeOf(SL);
   const [res, clients, sellers, sum] = await Promise.all([
     api('/api/sales' + qs({ store_id: S.stores.length > 1 ? S.storeId : '', status: SL.status, number: SL.num, date_from: SL.num ? '' : r.from, date_to: SL.num ? '' : r.to, page: SL.page, size: 50 })),
     can('clients.read') ? api('/api/clients' + qs({ size: 500 })) : { items: [] },
@@ -884,10 +925,10 @@ async function viewSales(v) {
         <tr><td>В долг</td><td class="r ${p.debt ? 'bad' : ''}">${money(p.debt)}</td></tr>${p.bonus ? `<tr><td>Бонусами</td><td class="r">${money(p.bonus)}</td></tr>` : ''}
         ${p.exchange ? `<tr><td>Зачёт по обменам</td><td class="r">${money(p.exchange)}</td></tr>` : ''}
         <tr><td><b>Чистая выручка</b></td><td class="r"><b>${money(sum.revenue.net)}</b></td></tr></tbody></table></div></section></aside>` : '';
-  v.innerHTML = `<div class="head"><div><h1>Продажи</h1><p class="sub">${res.total} ${plural(res.total, 'чек', 'чека', 'чеков')} · ${r.from === r.to ? fDay(r.from) : `${fDay(r.from)} — ${fDay(r.to)}`}</p></div>
+  v.innerHTML = `<div class="head"><div><h1>Продажи</h1><p class="sub">${res.total} ${plural(res.total, 'чек', 'чека', 'чеков')} · ${fRange(r)}</p></div>
     ${can('sales.create') ? '<a class="btn" href="#kassa">Новая продажа</a>' : ''}</div>
   <div class="row"><div class="grow panel"><div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:12px">
-    ${segPeriods(SL.period)}
+    ${rangeControls(SL, ['today', 'week', 'month', 'year'])}
     <select class="input" id="slStatus" style="width:auto"><option value="completed" ${SL.status === 'completed' ? 'selected' : ''}>Проведённые</option><option value="held" ${SL.status === 'held' ? 'selected' : ''}>Отложенные</option><option value="cancelled" ${SL.status === 'cancelled' ? 'selected' : ''}>Отменённые</option></select>
     <input class="input" id="slNum" type="number" placeholder="№ чека" value="${esc(SL.num)}" style="width:130px" aria-label="Номер чека"></div>
     ${res.items.length ? `<div class="tbl-wrap"><table><thead><tr><th>№</th><th>Дата</th><th>Клиент</th><th>Продавец</th><th>Товары</th><th>Оплата</th><th class="r">Сумма</th></tr></thead><tbody>
@@ -897,13 +938,13 @@ async function viewSales(v) {
         <td class="r"><b>${money(s.total)}</b>${s.returned_total ? `<br><small class="bad">возврат ${num(s.returned_total)}</small>` : ''}</td></tr>`).join('')}</tbody></table></div>
       ${pager(res.total, SL.page, 50)}` : '<p class="empty">За выбранный период продаж нет.</p>'}</div>${side}</div>`;
   v.onclick = e => {
-    const pb = e.target.closest('[data-period]'); if (pb) { SL.period = pb.dataset.period; SL.page = 1; route(); return; }
+    if (rangeEvent(SL, e)) { SL.page = 1; route(); return; }
     const pg = e.target.closest('[data-page]'); if (pg) { SL.page = +pg.dataset.page; route(); return; }
     if (e.target.closest('[data-a=xreport]')) { printPeriodReport(sum, r); return; }
     const tr = e.target.closest('[data-sale]'); if (tr) saleModal(res.items.find(s => s.id === +tr.dataset.sale), cn, sn);
   };
   v.onkeydown = e => { const tr = e.target.closest('[data-sale]'); if (tr && e.key === 'Enter') tr.click(); };
-  v.onchange = e => { if (e.target.id === 'slStatus') { SL.status = e.target.value; SL.page = 1; route(); } if (e.target.id === 'slNum') { SL.num = e.target.value; route(); } };
+  v.onchange = e => { if (rangeEvent(SL, e)) { SL.page = 1; route(); return; } if (e.target.id === 'slStatus') { SL.status = e.target.value; SL.page = 1; route(); } if (e.target.id === 'slNum') { SL.num = e.target.value; route(); } };
 }
 function printPeriodReport(d, r) {
   const w = window.open('', '_blank', 'width=420,height=700');
@@ -912,7 +953,7 @@ function printPeriodReport(d, r) {
   w.document.write(`<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><title>Отчёт за период</title><style>
     body{font:13px/1.5 "IBM Plex Mono",ui-monospace,monospace;margin:0;padding:16px;width:300px}h1{font-size:16px;text-align:center;margin:0}
     p{text-align:center;margin:0}.r{display:flex;justify-content:space-between}hr{border:0;border-top:1px dashed #000;margin:8px 0}b{font-size:15px}</style></head><body>
-    <h1>${esc(S.company.name)}</h1><p>Отчёт ${r.from === r.to ? 'за ' + fDay(r.from) : `${fDay(r.from)} — ${fDay(r.to)}`}</p><p>Распечатан ${new Date().toLocaleString('ru-RU')}</p><hr>
+    <h1>${esc(S.company.name)}</h1><p>Отчёт: ${fRange(r)}</p><p>Распечатан ${new Date().toLocaleString('ru-RU')}</p><hr>
     ${row('Чеков', t.count)}${row('Товаров, шт', num(t.goods_qty))}${row('Услуг, шт', num(t.services_qty))}${row('Средний чек', num(t.average_check))}<hr>
     ${row('Наличные', num(p.cash))}${row('Карта', num(p.card))}${row('В долг', num(p.debt))}${p.bonus ? row('Бонусами', num(p.bonus)) : ''}${p.exchange ? row('Зачёт обменов', num(p.exchange)) : ''}<hr>
     ${row('Продажи', num(d.revenue.gross))}${row(`Возвраты (${t.returns_count})`, '−' + num(t.returns_amount))}${row(`Обмены (${t.exchanges_count})`, num(t.exchanges_amount))}
@@ -1394,9 +1435,9 @@ async function viewMarketing(v) {
 }
 
 // ================= ОТЧЁТЫ =================
-const R = { period: 'month', tab: 'products' };
+const R = { period: 'month', tab: 'products', from: '', to: '' };
 async function viewReports(v) {
-  const r = periodRange(R.period), q = { date_from: r.from, date_to: r.to };
+  const r = rangeOf(R), q = { date_from: r.from, date_to: r.to };
   const tabs = { products: 'По товарам', sellers: 'По продавцам', stores: 'По магазинам', clients: 'По клиентам', marketing: 'Скидки и бонусы' };
   if (R.tab === 'clients' && !can('clients.read')) R.tab = 'products';
   const data = await api(`/api/reports/${R.tab}` + qs(q));
@@ -1409,14 +1450,16 @@ async function viewReports(v) {
   if (R.tab === 'marketing') { head = ['Промокод', 'Использований', 'Выручка', 'Скидка']; rows = data.promo_codes.map(x => [x.code, x.uses, money(x.revenue), money(x.discount)]);
     extra = `<div class="kpis" style="margin-bottom:14px"><div class="kpi" style="background:var(--bg)"><span>Всего скидок</span><b>${money(data.total_discount)}</b><small class="muted">${data.checks_with_discount} из ${data.checks_total} чеков со скидкой</small></div>
       <div class="kpi" style="background:var(--bg)"><span>Начислено бонусов</span><b>${num(data.bonus_earned)}</b></div><div class="kpi" style="background:var(--bg)"><span>Оплачено бонусами</span><b>${num(data.bonus_paid)}</b></div></div>`; }
-  v.innerHTML = `<div class="head"><div><h1>Отчёты</h1><p class="sub">${fDay(r.from)} — ${fDay(r.to)}. Выручка — с учётом скидок и возвратов, прибыль — минус себестоимость</p></div>${segPeriods(R.period, ['week', 'month', 'quarter', 'year'])}</div>
+  const days = Math.round((new Date(r.to) - new Date(r.from)) / 864e5) + 1;
+  v.innerHTML = `<div class="head"><div><h1>Отчёты</h1><p class="sub">${fRange(r)} · ${days} ${plural(days, 'день', 'дня', 'дней')}. Выручка — с учётом скидок и возвратов, прибыль — минус себестоимость</p></div>${rangeControls(R, ['week', 'month', 'quarter', 'year'])}</div>
     <div class="chips">${Object.entries(tabs).filter(([k]) => k !== 'clients' || can('clients.read')).map(([k, t]) => `<button class="chip ${R.tab === k ? 'on' : ''}" data-tab="${k}">${t}</button>`).join('')}</div>
     <section class="panel">${R.tab === 'marketing' ? extra : ''}
       ${rows.length ? `<div class="tbl-wrap"><table><thead><tr>${head.map((h, i) => `<th class="${i ? 'r' : ''}">${h}</th>`).join('')}</tr></thead><tbody>${rows.map(rw => `<tr>${rw.map((c, i) => `<td class="${i ? 'r' : ''}">${i ? esc(c) : `<b>${esc(c)}</b>`}</td>`).join('')}</tr>`).join('')}</tbody></table></div>
         <div class="modal-f"><button class="btn ghost sm" data-csv>Скачать CSV</button></div>` : '<p class="empty">За выбранный период данных нет.</p>'}
       ${R.tab === 'clients' ? extra : ''}</section>`;
+  v.onchange = e => { if (rangeEvent(R, e)) route(); };
   v.onclick = e => {
-    const pb = e.target.closest('[data-period]'); if (pb) { R.period = pb.dataset.period; route(); return; }
+    if (rangeEvent(R, e)) { route(); return; }
     const tb = e.target.closest('[data-tab]'); if (tb) { R.tab = tb.dataset.tab; route(); return; }
     if (e.target.closest('[data-csv]')) {
       const csv = [head, ...rows].map(rw => rw.map(c => `"${String(c).replace(/\u00a0|\u202f/g, ' ').replace(/"/g, '""')}"`).join(';')).join('\n');
