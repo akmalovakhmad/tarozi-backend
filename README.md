@@ -24,6 +24,14 @@ docker compose exec api python seed.py   # по желанию
 
 **Тесты:** `pytest`
 
+## Vercel
+
+Проект задеплоен: https://tarozi-api.vercel.app (документация: /docs). Точка входа — `index.py`, ключ `SECRET_KEY` задан в настройках проекта.
+
+**Важно:** пока не задан `DATABASE_URL`, на Vercel используется временная SQLite в `/tmp` — данные пропадают при перезапуске функции.
+Чтобы данные сохранялись: Vercel → проект tarozi-api → Storage → Create Database → Neon (Postgres) → Connect.
+Neon сам добавит `DATABASE_URL`, после этого нажмите Redeploy. Таблицы создадутся автоматически.
+
 ## Как устроено
 
 | Раздел | Адреса | Что делает |
