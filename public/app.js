@@ -31,7 +31,7 @@ const opts = (list, sel, val = 'id', label = 'name', empty) =>
   (empty != null ? `<option value="">${esc(empty)}</option>` : '') +
   list.map(x => `<option value="${esc(x[val])}" ${String(x[val]) === String(sel ?? '') ? 'selected' : ''}>${esc(x[label])}</option>`).join('');
 const initials = n => (n || '?').split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase();
-const PALETTE = ['#5B5BD6', '#18885A', '#B86E0C', '#CF3B47', '#7A4FD0', '#0E7FA8'];
+const PALETTE = ['#2448D8', '#0F7B6C', '#B7791F', '#C2362F', '#7A3FE4', '#0E1630'];
 const tint = id => { const c = PALETTE[(+id || 0) % PALETTE.length]; return [`color-mix(in srgb, ${c} 14%, transparent)`, c]; };
 
 // ---------- состояние ----------
@@ -150,7 +150,7 @@ const ICONS = {
   staff: I('<circle cx="12" cy="7" r="4"/><path d="M4 21c0-4 4-7 8-7s8 3 8 7"/>'),
   settings: I('<circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.6-2-3.4-2.4 1a7 7 0 0 0-2-1.2L14 3h-4l-.5 2.6a7 7 0 0 0-2 1.2l-2.4-1-2 3.4 2 1.6A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.6 2 3.4 2.4-1a7 7 0 0 0 2 1.2L10 21h4l.5-2.6a7 7 0 0 0 2-1.2l2.4 1 2-3.4-2-1.6c.1-.4.1-.8.1-1.2z"/>'),
 };
-const LOGO = `<svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true"><rect width="34" height="34" rx="9" fill="#5B5BD6"/><path d="M17 8v18M9 12h16M9 12l-3 7h6zM25 12l-3 7h6zM12 26h10" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+const LOGO = `<svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true"><rect width="34" height="34" rx="10" fill="#2448D8"/><path d="M17 8v18M9 12h16M9 12l-3 7h6zM25 12l-3 7h6zM12 26h10" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
 // ---------- маршруты ----------
 const ROUTES = {
@@ -480,9 +480,9 @@ async function viewDashboard(v) {
       ${segPeriods(D.period, ['today', 'week', 'month', 'year'])}
       ${can('sales.create') ? `<a class="btn" href="#kassa">${ICON.plus}Новая продажа</a>` : ''}</div></div>
   <div class="kpis">
-    <div class="kpi"><span>Чистая выручка</span><b>${money(net)}</b>${delta(net, prev.revenue.net)}${spark(nets)}</div>
+    <div class="kpi hero"><span>Чистая выручка ${label}</span><b>${money(net)}</b>${delta(net, prev.revenue.net)}${spark(nets, '#FFFFFF')}</div>
     <div class="kpi"><span>Чеков</span><b>${num(checks)}</b>${delta(checks, prev.transactions.count)}</div>
-    <div class="kpi"><span>Средний чек</span><b>${money(d.transactions.average_check)}</b>${delta(d.transactions.average_check, prev.transactions.average_check)}</div>
+    <div class="kpi dark"><span>Средний чек</span><b>${money(d.transactions.average_check)}</b>${delta(d.transactions.average_check, prev.transactions.average_check)}</div>
     <div class="kpi"><span>Отдано в долг</span><b class="${p.debt ? 'bad' : ''}">${money(p.debt)}</b><small>${payTotal ? Math.round(p.debt / payTotal * 100) : 0}% от оплат${d.transactions.returns_count ? ` · возвратов ${d.transactions.returns_count}` : ''}</small>${spark(d.by_day.map(x => x.debt), 'var(--c-debt)')}</div>
   </div>
   <div class="row">
@@ -1023,9 +1023,9 @@ async function viewProducts(v) {
   <div class="panel"><div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px">
     <label class="search" style="flex:1 1 280px">${ICON.search}<input id="pq" placeholder="Название, артикул или штрихкод" value="${esc(P.q)}" aria-label="Поиск"></label>
     <select class="input" id="pcat" style="width:auto">${opts(S.cats, P.cat, 'id', 'name', 'Все категории')}</select></div>
-    ${res.items.length ? `<div class="tbl-wrap"><table><thead><tr><th>Название</th><th>Артикул</th><th>Штрихкод</th><th>Категория</th><th class="r">Цена</th><th class="r">Себестоимость</th><th class="r">Остаток</th></tr></thead><tbody>
+    ${res.items.length ? `<div class="tbl-wrap"><table><thead><tr><th>Название</th><th>Артикул</th><th>Штрихкод</th><th>Категория</th><th class="r">Себестоимость</th><th class="r">Розница</th><th class="r">Опт</th><th class="r">Остаток</th></tr></thead><tbody>
     ${res.items.map(p => { const st = stockOf(p), ed = can('products.write'), ce = (f, v, ph = '—') => ed ? `<span class="cell-edit" data-edit="${f}" data-id="${p.id}" title="Нажмите, чтобы изменить">${v || ph}</span>` : (v || ph); return `<tr class="click" data-p="${p.id}" tabindex="0"><td><b>${ce('name', esc(p.name))}</b>${p.is_active ? '' : ' <span class="tag grey">выключен</span>'}</td><td>${esc(p.sku || '—')}</td><td>${ce('barcode', esc(p.barcode || ''))}</td><td>${esc(cn[p.category_id] || '—')}</td>
-      <td class="r">${ed && can('stock.manage') ? `<span class="cell-edit" data-edit="price" data-id="${p.id}" title="Нажмите, чтобы изменить цену">${money(p.retail_price)}</span>` : money(p.retail_price)}</td><td class="r muted">${num(p.cost_price)}</td>
+      <td class="r muted">${num(p.cost_price)}</td><td class="r"><b>${ed && can('stock.manage') ? `<span class="cell-edit" data-edit="price" data-id="${p.id}" title="Нажмите, чтобы изменить цену">${money(p.retail_price)}</span>` : money(p.retail_price)}</b></td><td class="r">${p.wholesale_price != null ? num(p.wholesale_price) : '<span class="muted">—</span>'}</td>
       <td class="r">${p.is_service ? '<span class="tag grey">услуга</span>' : `<span class="tag ${st <= 0 ? 'red' : st <= +S.company.low_stock_threshold ? 'amber' : 'green'}">${num(st)} ${esc(p.unit)}</span>`}</td></tr>`; }).join('')}
     </tbody></table></div>${pager(res.total, P.page, 50)}`
     : `<p class="empty">${stats.all ? 'По этому фильтру товаров нет.' : 'Каталог пустой. Добавьте первый товар или загрузите список из CSV.'}</p>`}</div>`;
@@ -1240,7 +1240,7 @@ function statementModal(c) {
     const w = window.open('', '_blank', 'width=760,height=800');
     if (!w) throw new Error('Браузер заблокировал окно печати');
     w.document.write(`<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><title>Акт сверки — ${esc(c.name)}</title><style>
-      body{font:14px/1.5 Onest,system-ui,sans-serif;margin:32px;color:#131A2C}h1{font-size:22px;margin:0 0 4px}table{width:100%;border-collapse:collapse;margin:16px 0}
+      body{font:14px/1.5 "Golos Text",system-ui,sans-serif;margin:32px;color:#131A2C}h1{font-size:22px;margin:0 0 4px}table{width:100%;border-collapse:collapse;margin:16px 0}
       th,td{border-bottom:1px solid #ccc;padding:6px 8px;text-align:left}td.r,th.r{text-align:right}tfoot td{font-weight:700}.sign{display:flex;justify-content:space-between;margin-top:48px}</style></head><body>
       <h1>Акт сверки взаиморасчётов</h1><p>${esc(S.company.name)} и ${esc(c.name)}${c.phone ? `, ${esc(c.phone)}` : ''}<br>Период: ${fDay(d.from)}.${d.from.slice(0, 4)} — ${fDay(d.to)}.${d.to.slice(0, 4)}</p>
       <table><thead><tr><th>Дата</th><th>Операция</th><th class="r">Долг +</th><th class="r">Оплата −</th></tr></thead><tbody>
