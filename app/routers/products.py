@@ -64,7 +64,7 @@ def list_suppliers(user: User = Depends(require("products.read")), db: Session =
         items = sum((Decimal(i.qty) for d in docs if d.supplier_id == sp.id and d.kind == "supplier_order" for i in d.items), Decimal(0))
         pd = Decimal(paid.get(sp.id) or 0)
         out.append(SupplierStatsOut(id=sp.id, name=sp.name, phone=sp.phone, note=sp.note, orders_total=orders, returns_total=rets,
-                                    paid_total=pd, debt=orders - rets - pd, items_count=items))
+                                    paid_total=pd, debt=Decimal(sp.opening_balance or 0) + orders - rets - pd, items_count=items))
     return out
 
 

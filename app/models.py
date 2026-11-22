@@ -37,6 +37,7 @@ class Store(Base):
     name: Mapped[str] = mapped_column(String(200))
     address: Mapped[str | None] = mapped_column(String(300))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    external_id: Mapped[str | None] = mapped_column(String(64), index=True)  # id записи в BILLZ (перенос данных)
 
 
 class Role(Base):
@@ -58,6 +59,7 @@ class User(Base):
     is_owner: Mapped[bool] = mapped_column(Boolean, default=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     store_ids: Mapped[list] = mapped_column(JSON, default=list)  # пусто = доступ ко всем магазинам
+    external_id: Mapped[str | None] = mapped_column(String(64), index=True)  # id записи в BILLZ (перенос данных)
     role: Mapped[Role | None] = relationship()
 
 
@@ -67,6 +69,7 @@ class Category(Base):
     company_id: Mapped[int] = mapped_column(ForeignKey("companies.id"), index=True)
     name: Mapped[str] = mapped_column(String(200))
     parent_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id"))
+    external_id: Mapped[str | None] = mapped_column(String(64), index=True)  # id записи в BILLZ (перенос данных)
 
 
 class Supplier(Base):
@@ -76,6 +79,8 @@ class Supplier(Base):
     name: Mapped[str] = mapped_column(String(200))
     phone: Mapped[str | None] = mapped_column(String(50))
     note: Mapped[str | None] = mapped_column(Text)
+    external_id: Mapped[str | None] = mapped_column(String(64), index=True)  # id записи в BILLZ (перенос данных)
+    opening_balance: Mapped[Decimal] = mapped_column(Money, default=Decimal("0"))  # долг перед поставщиком, перенесённый из прошлой системы
 
 
 class Product(Base):
@@ -95,6 +100,7 @@ class Product(Base):
     retail_price: Mapped[Decimal] = mapped_column(Money, default=Decimal("0"))
     wholesale_price: Mapped[Decimal | None] = mapped_column(Money)  # оптовая цена (если пусто — продаём по рознице)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    external_id: Mapped[str | None] = mapped_column(String(64), index=True)  # id записи в BILLZ (перенос данных)
 
 
 class StockLevel(Base):
@@ -173,6 +179,7 @@ class Client(Base):
     sms_allowed: Mapped[bool] = mapped_column(Boolean, default=True)
     gender: Mapped[str | None] = mapped_column(String(1))  # m / f
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    external_id: Mapped[str | None] = mapped_column(String(64), index=True)  # id записи в BILLZ (перенос данных)
 
 
 class ClientDebt(Base):
@@ -188,6 +195,7 @@ class ClientDebt(Base):
     due_date: Mapped[date | None] = mapped_column(Date)
     note: Mapped[str | None] = mapped_column(String(300))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+    external_id: Mapped[str | None] = mapped_column(String(64), index=True)  # id записи в BILLZ (перенос данных)
 
 
 class DebtPayment(Base):
@@ -281,6 +289,7 @@ class Sale(Base):
     exchange_of_id: Mapped[int | None] = mapped_column(ForeignKey("sales.id"))  # продажа, оформленная как обмен
     created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))  # кто пробил чек (продавец может быть другим)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+    external_id: Mapped[str | None] = mapped_column(String(64), index=True)  # id записи в BILLZ (перенос данных)
     items: Mapped[list["SaleItem"]] = relationship(cascade="all, delete-orphan", lazy="selectin")
     payments: Mapped[list["Payment"]] = relationship(cascade="all, delete-orphan", lazy="selectin")
 

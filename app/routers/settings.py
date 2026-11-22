@@ -75,11 +75,13 @@ def delete_target(target_id: int, user: User = Depends(require("settings.manage"
 class BillzImportIn(BaseModel):
     secret_token: str = Field(min_length=20, max_length=2000)
     import_clients: bool = True
+    step: str = "all"  # catalog, staff, people, sales (с month=ГГГГ-ММ), debts или all
+    month: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}$")
 
 
 @router.post("/import/billz")
 def import_billz(data: BillzImportIn, user: User = Depends(require("settings.manage", "products.write")),
                  db: Session = Depends(get_db)):
-    """Перенос магазинов, категорий, товаров (цены, остатки) и клиентов из BILLZ. Ключ не сохраняется."""
+    """Перенос данных из BILLZ по шагам. Ключ не сохраняется."""
     from app.services import billz_import
-    return billz_import.run(db, user.company_id, data.secret_token, data.import_clients)
+    return billz_import.run(db, user.company_id, data.secret_token, data.step, data.month, data.import_clients)

@@ -132,10 +132,8 @@ def test_supplier_debt_payments_and_returns(client):
 
 def test_billz_import(client, monkeypatch):
     from app.services import billz_import
-    calls = []
 
     def fake(method, path, token=None, body=None, params=None):
-        calls.append(path)
         if path == "/v1/auth/login":
             return {"code": 200, "data": {"access_token": "t"}} if body["secret_token"] == "good-token-1234567890" else {"code": 401}
         if path == "/v1/shop":
@@ -148,21 +146,64 @@ def test_billz_import(client, monkeypatch):
                  "measurement_unit": {"short_name": "шт"}, "shop_prices": [{"shop_id": "s1", "retail_price": 100, "supply_price": 36}],
                  "shop_measurement_values": [{"shop_id": "s1", "active_measurement_value": 7}]},
                 {"id": "p0", "name": "Parent", "is_variative": True}]}
+        if path == "/v1/user":
+            return {"count": 1, "users": [{"id": "u1", "first_name": "Нодира", "last_name": "Ахмедова", "shops": [{"shop_id": "s1"}]}]}
         if path == "/v1/client":
-            return {"count": 1, "clients": [{"first_name": "Азиз", "last_name": "Каримов", "phone_numbers": ["998901112233"], "gender": "male", "birth_date": "1990-05-14"}]}
+            return {"count": 1, "clients": [{"id": "k1", "first_name": "Азиз", "last_name": "Каримов", "phone_numbers": ["998901112233"],
+                                             "gender": "male", "birth_date": "1990-05-14", "balance": 15}]}
+        if path == "/v1/supplier":
+            return {"count": 1, "suppliers": [{"id": "sp1", "name": "ООО Стиль", "debt_value": 500, "phone_numbers": ["998711234567"]}]}
+        if path == "/v1/transaction-report-table":
+            if params["start_date"] != "2026-10-01":
+                return {"rows": []}
+            return {"count": 2, "rows": [
+                {"order_id": "o1", "date": "2026-10-05 14:30:00", "shop_id": "s1", "customer_id": "k1", "seller_ids": ["u1"], "cashier_id": "u1",
+                 "order_type": "SALE", "total_price": 200, "gross_sales": 180,
+                 "payments": [{"payment_type_name": "Наличные", "sum": 100}, {"payment_type_name": "Долг", "sum": 80}]},
+                {"order_id": "o2", "date": "2026-10-06 10:00:00", "shop_id": "s1", "customer_id": "k1", "seller_ids": ["u1"],
+                 "order_type": "RETURN", "total_price": 90, "gross_sales": 90, "payments": [{"payment_type_name": "Наличные", "sum": 90}]}]}
+        if path == "/v1/customer-purchases-table":
+            return {"count": 3, "purchases": [
+                {"order_id": "o1", "order_number": "1042", "product_id": "p1", "product_name": "Pomade Red", "sold_measurement_value": 2,
+                 "gross_sales": 200, "net_sales": 180, "net_sold_supply_sum": 72},
+                {"order_id": "o2", "order_number": "1043", "product_id": "p1", "product_name": "Pomade Red", "returned_measurement_value": 1,
+                 "gross_sales": -90, "net_sales": -90, "net_sold_supply_sum": -36},
+                {"order_id": "o1", "order_number": "1042", "product_id": "gone", "product_name": "Старый воск", "sold_measurement_value": 0}]}
+        if path == "/v1/debt":
+            return {"count": 1, "data": [{"id": "d1", "order_id": "o1", "order_number": "1042", "amount": 80, "paid_amount": 30,
+                                          "repayment_date": "2026-12-01", "customer": {"id": "k1"}, "shop": {"id": "s1"}}]}
         return {}
     monkeypatch.setattr(billz_import, "fetch", fake)
     h = register(client)
+    tok = "good-token-1234567890"
     bad = client.post("/api/import/billz", json={"secret_token": "wrong-token-1234567890"}, headers=h)
     assert bad.status_code == 422
-    r = client.post("/api/import/billz", json={"secret_token": "good-token-1234567890"}, headers=h)
-    assert r.status_code == 200, r.text
-    rep = r.json()
-    assert rep["stores_created"] == 1 and rep["categories_created"] == 2 and rep["products_created"] == 1 and rep["clients_created"] == 1
+    for step in ("catalog", "staff", "people"):
+        r = client.post("/api/import/billz", json={"secret_token": tok, "step": step}, headers=h)
+        assert r.status_code == 200, r.text
+    r = client.post("/api/import/billz", json={"secret_token": tok, "step": "sales", "month": "2026-10"}, headers=h).json()
+    assert r["sales_created"] == 1 and r["returns_created"] == 1 and r["month_transactions"] == 2
+    empty = client.post("/api/import/billz", json={"secret_token": tok, "step": "sales", "month": "2026-09"}, headers=h).json()
+    assert empty["month_transactions"] == 0
+    d = client.post("/api/import/billz", json={"secret_token": tok, "step": "debts"}, headers=h).json()
+    assert d["debts_created"] == 1
+
     p = client.get("/api/products?q=M008", headers=h).json()["items"][0]
     assert p["retail_price"] == 100 and p["cost_price"] == 36 and p["stock_total"] == 7
     c = client.get("/api/clients?q=Азиз", headers=h).json()["items"][0]
-    assert c["phone"] == "+998901112233" and c["gender"] == "m" and c["birth_date"] == "1990-05-14"
-    # повторный импорт ничего не дублирует
-    rep2 = client.post("/api/import/billz", json={"secret_token": "good-token-1234567890"}, headers=h).json()
-    assert rep2["products_created"] == 0 and rep2["products_updated"] == 1 and rep2["clients_created"] == 0 and rep2["stock_lines"] == 0
+    assert c["phone"] == "+998901112233" and c["gender"] == "m" and c["bonus_balance"] == 15 and c["debt_balance"] == 50
+    sup = [s for s in client.get("/api/suppliers", headers=h).json() if s["name"] == "ООО Стиль"][0]
+    assert sup["debt"] == 500
+    staff = [u for u in client.get("/api/users", headers=h).json() if u["name"] == "Нодира Ахмедова"][0]
+    assert staff["is_active"] is False
+    sales = client.get("/api/sales?status=completed&date_from=2026-10-01&date_to=2026-10-31", headers=h).json()
+    items = sales["items"] if isinstance(sales, dict) else sales
+    s = [x for x in items if x["number"] == 1042][0]
+    assert s["total"] == 180 and s["discount"] == 20 and {pm["method"] for pm in s["payments"]} == {"cash", "debt"}
+
+    # повторный перенос ничего не дублирует
+    client.post("/api/import/billz", json={"secret_token": tok, "step": "catalog"}, headers=h)
+    again = client.post("/api/import/billz", json={"secret_token": tok, "step": "sales", "month": "2026-10"}, headers=h).json()
+    assert again["sales_created"] == 0 and again["sales_skipped"] == 2
+    d2 = client.post("/api/import/billz", json={"secret_token": tok, "step": "debts"}, headers=h).json()
+    assert d2["debts_created"] == 0 and d2["debts_updated"] == 1

@@ -929,7 +929,7 @@ async function viewSales(v) {
     ${can('sales.create') ? '<a class="btn" href="#kassa">Новая продажа</a>' : ''}</div>
   <div class="row"><div class="grow panel"><div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:12px">
     ${rangeControls(SL, ['today', 'week', 'month', 'year'])}
-    <select class="input" id="slStatus" style="width:auto"><option value="completed" ${SL.status === 'completed' ? 'selected' : ''}>Проведённые</option><option value="held" ${SL.status === 'held' ? 'selected' : ''}>Отложенные</option><option value="cancelled" ${SL.status === 'cancelled' ? 'selected' : ''}>Отменённые</option></select>
+    <select class="input" id="slStatus" style="width:auto"><option value="completed" ${SL.status === 'completed' ? 'selected' : ''}>Проведённые</option><option value="held" ${SL.status === 'held' ? 'selected' : ''}>Отложенные</option><option value="cancelled" ${SL.status === 'cancelled' ? 'selected' : ''}>Отменённые</option><option value="return" ${SL.status === 'return' ? 'selected' : ''}>Возвраты из BILLZ</option></select>
     <input class="input" id="slNum" type="number" placeholder="№ чека" value="${esc(SL.num)}" style="width:130px" aria-label="Номер чека"></div>
     ${res.items.length ? `<div class="tbl-wrap"><table><thead><tr><th>№</th><th>Дата</th><th>Клиент</th><th>Продавец</th><th>Товары</th><th>Оплата</th><th class="r">Сумма</th></tr></thead><tbody>
       ${res.items.map(s => `<tr class="click" data-sale="${s.id}" tabindex="0"><td class="num">${s.number}${s.exchange_of_id ? ' <span class="tag grey">обмен</span>' : ''}</td><td>${fDateTime(s.created_at)}</td><td>${esc(cn[s.client_id] || (s.client_id ? 'Клиент' : '—'))}</td>
@@ -1526,7 +1526,7 @@ async function viewSettings(v) {
   <section class="panel"><div class="head" style="margin-bottom:8px"><h2>Магазины</h2><button class="btn ghost sm" data-a="store">Добавить магазин</button></div>
     <div class="tbl-wrap"><table><tbody>${stores.map(s => `<tr class="click" data-s="${s.id}" tabindex="0"><td><b>${esc(s.name)}</b><br><small class="muted">${esc(s.address || 'адрес не указан')}</small></td><td class="r"><span class="tag ${s.is_active ? 'green' : 'grey'}">${s.is_active ? 'работает' : 'закрыт'}</span></td></tr>`).join('')}</tbody></table></div></section>
   <section class="panel"><div class="head" style="margin-bottom:8px"><h2>Перенос из BILLZ</h2><button class="btn ghost sm" data-a="billz">Перенести данные</button></div>
-    <p class="muted" style="margin:0">Магазины, категории, товары с ценами и остатками, клиенты. Повторный перенос обновляет данные, а не дублирует их.</p></section>
+    <p class="muted" style="margin:0">Все данные: товары и остатки, сотрудники, клиенты, поставщики, история продаж и долги. Повторный перенос обновляет данные, а не дублирует их.</p></section>
   <section class="panel"><div class="head" style="margin-bottom:8px"><h2>Цели по выручке</h2><button class="btn ghost sm" data-a="target">Новая цель</button></div>
     ${targets.length ? `<div class="tbl-wrap"><table><tbody>${targets.map(t => `<tr><td>${fDay(t.period_start)} — ${fDay(t.period_end)}<br><small class="muted">${esc(t.store_id ? sn[t.store_id] : 'Все магазины')}</small></td><td class="r"><b>${money(t.amount)}</b></td><td class="r"><button class="btn link sm" data-deltarget="${t.id}">Удалить</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">Целей пока нет.</p>'}</section>
   </div></div>`;
@@ -1544,24 +1544,43 @@ async function viewSettings(v) {
     await api(s ? `/api/stores/${s.id}` : '/api/stores', { method: s ? 'PUT' : 'POST', body: { name: d.name, address: d.address || null, is_active: !!d.is_active } });
     S.stores = (await api('/api/stores')).filter(x => x.is_active); m.close(); toast('Магазин сохранён'); renderShell(); route();
   });
-  const billzModal = () => formModal('Перенос из BILLZ', `<p class="muted" style="margin:0">Ключ берётся в BILLZ: Настройки → Интеграции → API (secret token). Он используется один раз и не сохраняется.</p>
+  const billzModal = () => formModal('Перенос из BILLZ', `<p class="muted" style="margin:0">Переносится всё: магазины, категории, товары с ценами и остатками, сотрудники, клиенты с кэшбэком, поставщики с долгами, вся история продаж и возвратов, долги клиентов.</p>
     ${field('Ключ API из BILLZ', '<input class="input" name="secret_token" type="password" autocomplete="off" required minlength="20">')}
-    <label class="check"><input type="checkbox" name="import_clients" checked> Перенести и клиентов</label>
-    <p class="muted" style="margin:0">Обычно занимает до минуты. Продажи и долги из BILLZ не переносятся.</p>`,
+    <p class="muted" style="margin:0">Ключ создаётся в BILLZ: Настройки → Интеграции. Дайте ему доступ на чтение ко всем разделам. Ключ не сохраняется. Не закрывайте вкладку, пока идёт перенос: история продаж переносится по месяцам.</p>
+    <div id="bzLog" class="blist" hidden></div>`,
   async (d, m) => {
-    const btn = $('button[type=submit]', m.el); btn.textContent = 'Переношу…';
+    const btn = $('button[type=submit]', m.el), log = $('#bzLog', m.el), key = d.secret_token.trim();
+    const tot = {}; log.hidden = false; log.innerHTML = '';
+    const line = t => { const p = document.createElement('p'); p.textContent = t; log.append(p); return p; };
+    const add = r => { for (const [k, v] of Object.entries(r)) if (typeof v === 'number' && k !== 'month_transactions') tot[k] = (tot[k] || 0) + v; (r.notes || []).forEach(n => (tot.notes ||= new Set()).add(n)); };
+    const call = (step, month) => api('/api/import/billz', { method: 'POST', body: { secret_token: key, step, month } });
+    btn.textContent = 'Переношу…';
     try {
-      const r = await api('/api/import/billz', { method: 'POST', body: { secret_token: d.secret_token.trim(), import_clients: !!d.import_clients } });
+      for (const [step, label] of [['catalog', 'Товары, остатки, магазины'], ['staff', 'Сотрудники'], ['people', 'Клиенты и поставщики']]) {
+        const p = line(label + '…'); add(await call(step)); p.textContent = label + ' — готово';
+      }
+      const ps = line('Продажи…'); let empty = 0, sales = 0;
+      const dt = new Date(); dt.setDate(1);
+      for (let i = 0; i < 120 && empty < 12; i++) {
+        const mon = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`;
+        ps.textContent = `Продажи: ${mon}… перенесено чеков ${sales}`;
+        const r = await call('sales', mon); add(r);
+        sales += r.sales_created + r.returns_created; empty = r.month_transactions ? 0 : empty + 1;
+        dt.setMonth(dt.getMonth() - 1);
+      }
+      ps.textContent = `Продажи — готово, перенесено чеков: ${sales}`;
+      const pd = line('Долги клиентов…'); add(await call('debts')); pd.textContent = 'Долги клиентов — готово';
       m.close();
       modal('Данные перенесены', `<div class="blist">
-        <p>Товаров: новых <b>${r.products_created}</b>, обновлено <b>${r.products_updated}</b></p>
-        <p>Строк остатков выставлено: <b>${r.stock_lines}</b></p>
-        <p>Клиентов: новых <b>${r.clients_created}</b>, обновлено <b>${r.clients_updated}</b></p>
-        <p>Магазинов создано: <b>${r.stores_created}</b>, категорий: <b>${r.categories_created}</b></p>
-        ${r.skipped.length ? `<p class="muted">Пропущено: ${r.skipped.length}</p>` : ''}
-        <p class="muted">${r.notes.map(esc).join('<br>')}</p></div>`);
+        <p>Товаров: новых <b>${tot.products_created || 0}</b>, обновлено <b>${tot.products_updated || 0}</b>; строк остатков: <b>${tot.stock_lines || 0}</b></p>
+        <p>Продаж: <b>${tot.sales_created || 0}</b>, возвратов: <b>${tot.returns_created || 0}</b>${tot.sales_skipped ? `, уже были: ${tot.sales_skipped}` : ''}</p>
+        <p>Клиентов: новых <b>${tot.clients_created || 0}</b>, обновлено <b>${tot.clients_updated || 0}</b>; долгов: <b>${(tot.debts_created || 0) + (tot.debts_updated || 0)}</b></p>
+        <p>Поставщиков: <b>${(tot.suppliers_created || 0) + (tot.suppliers_updated || 0)}</b>, сотрудников: <b>${tot.staff_created || 0}</b></p>
+        <p>Магазинов создано: <b>${tot.stores_created || 0}</b>, категорий: <b>${tot.categories_created || 0}</b></p>
+        ${tot.notes ? `<p class="muted">${[...tot.notes].map(esc).join('<br>')}</p>` : ''}</div>`);
       S.stores = (await api('/api/stores')).filter(x => x.is_active); renderShell(); route();
-    } finally { btn.textContent = 'Перенести'; }
+    } catch (x) { line('Остановлено: ' + x.message + '. Запустите перенос ещё раз — уже перенесённое не задвоится.'); throw x; }
+    finally { btn.textContent = 'Перенести'; }
   }, { submit: 'Перенести' });
   v.onclick = async e => {
     const t = e.target.closest('[data-a],[data-s],[data-deltarget]'); if (!t) return;

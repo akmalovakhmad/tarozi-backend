@@ -1,28 +1,38 @@
-"""Перенос данных из BILLZ (api-admin.billz.ai) в Тарози: магазины, категории, товары с ценами и остатками, клиенты.
+"""Перенос всех данных из BILLZ (api-admin.billz.ai) в Тарози.
 
-Ключ BILLZ (secret_token) используется только на время импорта и нигде не сохраняется.
-Повторный запуск безопасен: товары сопоставляются по артикулу/штрихкоду, клиенты — по телефону,
-остатки выставляются равными остаткам в BILLZ (через журнал движений с причиной «import»)."""
+Импорт идёт шагами, чтобы каждый запрос укладывался в лимит времени сервера:
+  catalog — магазины, категории, товары с ценами и остатками;
+  staff   — сотрудники (переносятся выключенными: владелец задаёт им пароль и включает);
+  people  — клиенты (с кэшбэком) и поставщики (с долгом перед ними);
+  sales   — продажи, возвраты и обмены за один месяц (month=YYYY-MM): чеки, товары, оплаты, продавцы;
+  debts   — долги клиентов со сроками и оплатами.
+Ключ BILLZ (secret_token) используется только на время запроса и нигде не сохраняется.
+Повторный запуск безопасен: записи сопоставляются по id из BILLZ (external_id), а для старых данных — по артикулу/телефону."""
 import json
+import re
+import secrets
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Category, Client, Company, Product, Store
+from app.models import (Category, Client, ClientDebt, Company, Payment, Product, Sale, SaleItem, SaleReturn, Store,
+                        Supplier, User)
+from app.security import hash_password
 from app.services.stock import change_stock, get_level
 
 HOST = "https://api-admin.billz.ai"
 PAGE = 500
+STEPS = ("catalog", "staff", "people", "sales", "debts")
 
 
 def _http(method: str, path: str, token: str | None = None, body: dict | None = None, params: dict | None = None) -> dict:
-    url = HOST + path + ("?" + urllib.parse.urlencode(params) if params else "")
+    url = HOST + path + ("?" + urllib.parse.urlencode(params, doseq=True) if params else "")
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method, headers={"Content-Type": "application/json", "Accept": "application/json"})
     if token:
@@ -31,8 +41,10 @@ def _http(method: str, path: str, token: str | None = None, body: dict | None = 
         with urllib.request.urlopen(req, timeout=60) as r:
             return json.loads(r.read().decode() or "{}")
     except urllib.error.HTTPError as e:
-        if e.code in (401, 403):
+        if e.code == 401 or (e.code == 403 and path == "/v1/auth/login"):
             raise HTTPException(422, "BILLZ не принял ключ. Проверьте, что скопировали его целиком, и что он не отозван")
+        if e.code == 403:
+            raise HTTPException(422, f"У ключа BILLZ нет прав на чтение {path}. Дайте ключу доступ на чтение в BILLZ: Настройки → Интеграции")
         raise HTTPException(502, f"BILLZ ответил ошибкой {e.code} на {path}")
     except urllib.error.URLError:
         raise HTTPException(502, "Не удалось связаться с BILLZ. Попробуйте ещё раз через минуту")
@@ -49,17 +61,92 @@ def _dec(v) -> Decimal:
         return Decimal(0)
 
 
-def _pages(token: str, path: str, key: str) -> list[dict]:
+def _items(r: dict, key: str) -> tuple[list, int]:
+    if isinstance(r.get("data"), dict):
+        r = r["data"]
+    items = r.get(key)
+    if items is None and isinstance(r.get("data"), list):
+        items = r["data"]
+    return items or [], int(r.get("count") or 0)
+
+
+def _pages(token: str, path: str, key: str, params: dict | None = None) -> list[dict]:
     out, page = [], 1
     while True:
-        r = fetch("GET", path, token, params={"page": page, "limit": PAGE})
-        r = r.get("data", r) if isinstance(r.get("data"), dict) else r
-        items = r.get(key) or []
+        items, total = _items(fetch("GET", path, token, params={**(params or {}), "page": page, "limit": PAGE}), key)
         out += items
-        total = int(r.get("count") or 0)
-        if not items or len(out) >= total or len(items) < PAGE or page > 200:
+        if not items or (total and len(out) >= total) or len(items) < PAGE or page >= 400:
             return out
         page += 1
+
+
+def _login(secret_token: str) -> str:
+    auth = fetch("POST", "/v1/auth/login", body={"secret_token": secret_token.strip()})
+    token = (auth.get("data") or {}).get("access_token")
+    if not token:
+        raise HTTPException(422, "BILLZ не принял ключ. Проверьте, что скопировали его целиком")
+    return token
+
+
+def _phone(v: str | None) -> str | None:
+    d = re.sub(r"\D", "", v or "")
+    return "+" + d if d else None
+
+
+def _when(v, offset_min: int) -> datetime | None:
+    """Дата из BILLZ → наивное UTC-время, как хранит Тарози. Без пояса считаем время местным для компании."""
+    if not v:
+        return None
+    s = str(v).strip().replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(s if "T" in s or " " in s else s + "T12:00:00")
+    except ValueError:
+        try:
+            dt = datetime.strptime(s[:19], "%d.%m.%Y %H:%M:%S")
+        except ValueError:
+            return None
+    if dt.tzinfo:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt - timedelta(minutes=offset_min)
+
+
+def _method(name: str | None) -> str:
+    n = (name or "").lower()
+    if any(w in n for w in ("налич", "naqd", "cash")):
+        return "cash"
+    if any(w in n for w in ("долг", "qarz", "debt", "nasiya", "насия")):
+        return "debt"
+    if any(w in n for w in ("кэшбэк", "кешбэк", "бонус", "cashback", "bonus", "keshbek")):
+        return "bonus"
+    return "card"
+
+
+def _report() -> dict:
+    return {k: 0 for k in ("stores_created", "categories_created", "products_created", "products_updated", "stock_lines",
+                           "staff_created", "clients_created", "clients_updated", "suppliers_created", "suppliers_updated",
+                           "sales_created", "returns_created", "sales_skipped", "debts_created", "debts_updated")} | {"skipped": [], "notes": []}
+
+
+def _by_ext(db: Session, model, company_id: int) -> dict:
+    return {o.external_id: o for o in db.scalars(select(model).where(model.company_id == company_id, model.external_id.isnot(None)))}
+
+
+def _shop_map(db: Session, token: str, company_id: int, rep: dict) -> dict[str, int]:
+    stores = {s.name.strip().lower(): s for s in db.scalars(select(Store).where(Store.company_id == company_id))}
+    ext = {s.external_id: s for s in stores.values() if s.external_id}
+    out = {}
+    for sh in _pages(token, "/v1/shop", "shops"):
+        name = (sh.get("name") or "Магазин").strip()
+        st = ext.get(sh.get("id")) or stores.get(name.lower())
+        if not st:
+            st = Store(company_id=company_id, name=name[:200], address=sh.get("address") or None)
+            db.add(st)
+            stores[name.lower()] = st
+            rep["stores_created"] += 1
+        st.external_id = sh.get("id")
+        db.flush()
+        out[sh.get("id")] = st.id
+    return out
 
 
 def _flat_categories(rows: list[dict], parent: str | None = None) -> list[dict]:
@@ -70,83 +157,72 @@ def _flat_categories(rows: list[dict], parent: str | None = None) -> list[dict]:
     return out
 
 
-def run(db: Session, company_id: int, secret_token: str, import_clients: bool = True) -> dict:
-    auth = fetch("POST", "/v1/auth/login", body={"secret_token": secret_token.strip()})
-    token = (auth.get("data") or {}).get("access_token")
-    if not token:
-        raise HTTPException(422, "BILLZ не принял ключ. Проверьте, что скопировали его целиком")
-    company = db.get(Company, company_id)
-    rep = {"stores_created": 0, "categories_created": 0, "products_created": 0, "products_updated": 0,
-           "stock_lines": 0, "clients_created": 0, "clients_updated": 0, "skipped": [], "notes": []}
+# ---------- шаги ----------
 
-    # магазины: по названию; новые — создаём
-    stores = {s.name.strip().lower(): s for s in db.scalars(select(Store).where(Store.company_id == company_id))}
-    shop_map: dict[str, int] = {}
-    for sh in _pages(token, "/v1/shop", "shops"):
-        name = (sh.get("name") or "Магазин").strip()
-        st = stores.get(name.lower())
-        if not st:
-            st = Store(company_id=company_id, name=name, address=sh.get("address") or None)
-            db.add(st)
-            db.flush()
-            stores[name.lower()] = st
-            rep["stores_created"] += 1
-        shop_map[sh.get("id")] = st.id
-
-    # категории (дерево)
-    cats = {c.name.strip().lower(): c for c in db.scalars(select(Category).where(Category.company_id == company_id))}
+def step_catalog(db: Session, company: Company, token: str, rep: dict) -> None:
+    cid = company.id
+    shop_map = _shop_map(db, token, cid, rep)
+    cats = {c.name.strip().lower(): c for c in db.scalars(select(Category).where(Category.company_id == cid))}
+    cats_ext = {c.external_id: c for c in cats.values() if c.external_id}
     cat_map: dict[str, int] = {}
     flat = _flat_categories(_pages(token, "/v2/category", "categories"))
     for c in flat:
         if not c["name"]:
             continue
-        ex = cats.get(c["name"].lower())
+        ex = cats_ext.get(c["id"]) or cats.get(c["name"].lower())
         if not ex:
-            ex = Category(company_id=company_id, name=c["name"])
+            ex = Category(company_id=cid, name=c["name"][:200])
             db.add(ex)
-            db.flush()
             cats[c["name"].lower()] = ex
             rep["categories_created"] += 1
+        ex.external_id = c["id"]
+        db.flush()
         cat_map[c["id"]] = ex.id
-    for c in flat:  # родители — вторым проходом, когда все уже созданы
+    for c in flat:
         if c["parent"] in cat_map and c["id"] in cat_map and cat_map[c["parent"]] != cat_map[c["id"]]:
             db.get(Category, cat_map[c["id"]]).parent_id = cat_map[c["parent"]]
 
-    # товары
-    by_sku = {p.sku: p for p in db.scalars(select(Product).where(Product.company_id == company_id, Product.sku.isnot(None)))}
-    by_bar = {p.barcode: p for p in db.scalars(select(Product).where(Product.company_id == company_id, Product.barcode.isnot(None)))}
+    prods = list(db.scalars(select(Product).where(Product.company_id == cid)))
+    by_ext = {p.external_id: p for p in prods if p.external_id}
+    by_sku = {p.sku: p for p in prods if p.sku}
+    by_bar = {p.barcode: p for p in prods if p.barcode}
     for bp in _pages(token, "/v2/products", "products"):
         if bp.get("is_variative"):
-            continue  # карточка-родитель вариаций, сами вариации идут отдельными товарами
+            continue  # карточка-родитель вариаций; сами вариации приходят отдельными товарами
         name = (bp.get("name") or "").strip()
         if not name:
             rep["skipped"].append(f"товар без названия (id {bp.get('id')})")
             continue
         sku, bar = (bp.get("sku") or "").strip() or None, (bp.get("barcode") or "").strip() or None
-        p = (by_sku.get(sku) if sku else None) or (by_bar.get(bar) if bar else None)
+        p = by_ext.get(bp.get("id")) or (by_sku.get(sku) if sku else None) or (by_bar.get(bar) if bar else None)
         prices = bp.get("shop_prices") or []
         retail = max((_dec(x.get("retail_price")) for x in prices), default=Decimal(0))
         supply = max((_dec(x.get("supply_price")) for x in prices), default=Decimal(0))
-        cat_ids = [c.get("id") for c in bp.get("categories") or []]
-        unit = ((bp.get("measurement_unit") or {}).get("short_name") or "шт")[:20]
+        wholesale = max((_dec(x.get("wholesale_price")) for x in prices), default=Decimal(0))
         if p:
             rep["products_updated"] += 1
         else:
             if sku and sku in by_sku:
                 sku = None
-            p = Product(company_id=company_id, name=name, sku=sku)
+            p = Product(company_id=cid, name=name[:300], sku=sku)
             db.add(p)
             rep["products_created"] += 1
-        p.name, p.barcode, p.unit = name[:300], bar or p.barcode, unit
-        if cat_ids and cat_ids[0] in cat_map:
-            p.category_id = cat_map[cat_ids[0]]
+        p.external_id = bp.get("id")
+        p.name, p.barcode = name[:300], bar or p.barcode
+        p.unit = (((bp.get("measurement_unit") or {}).get("short_name")) or p.unit or "шт")[:20]
+        cat_ids = [c.get("id") for c in bp.get("categories") or []]
+        if cat_ids and cat_ids[-1] in cat_map:
+            p.category_id = cat_map[cat_ids[-1]]
         if retail:
             p.retail_price = retail
         if supply:
             p.cost_price = supply
+        if wholesale:
+            p.wholesale_price = wholesale
         db.flush()
-        if sku:
-            by_sku[sku] = p
+        by_ext[p.external_id] = p
+        if p.sku:
+            by_sku[p.sku] = p
         if bar:
             by_bar[bar] = p
         for sv in bp.get("shop_measurement_values") or []:
@@ -156,34 +232,246 @@ def run(db: Session, company_id: int, secret_token: str, import_clients: bool = 
             target = _dec(sv.get("active_measurement_value"))
             current = Decimal(get_level(db, p.id, sid).qty)
             if target != current:
-                change_stock(db, company_id=company_id, product=p, store_id=sid, delta=target - current, reason="import",
+                change_stock(db, company_id=cid, product=p, store_id=sid, delta=target - current, reason="import",
                              ref_id=None, user_id=None, allow_negative=True)
                 rep["stock_lines"] += 1
 
-    # клиенты
-    if import_clients:
-        phones = {c.phone: c for c in db.scalars(select(Client).where(Client.company_id == company_id, Client.phone.isnot(None)))}
-        for bc in _pages(token, "/v1/client", "clients"):
-            name = " ".join(x for x in (bc.get("first_name"), bc.get("last_name")) if x).strip() or "Без имени"
-            phone = next((x for x in bc.get("phone_numbers") or [] if x), None)
-            phone = ("+" + phone.lstrip("+")) if phone else None
-            c = phones.get(phone) if phone else None
-            if c:
-                rep["clients_updated"] += 1
-            else:
-                c = Client(company_id=company_id, name=name[:200], phone=phone, tags=["BILLZ"])
-                db.add(c)
-                rep["clients_created"] += 1
-                if phone:
-                    phones[phone] = c
-            c.name = name[:200]
-            g = str(bc.get("gender") or "").lower()
-            c.gender = "m" if g in ("1", "male", "m") else "f" if g in ("2", "female", "f") else c.gender
-            try:
-                if bc.get("birth_date"):
-                    c.birth_date = date.fromisoformat(str(bc["birth_date"])[:10])
-            except ValueError:
-                pass
-    rep["notes"].append("История продаж и долги клиентов из BILLZ не переносятся: их API открыто отдаёт только справочники.")
+
+def step_staff(db: Session, company: Company, token: str, rep: dict) -> None:
+    cid = company.id
+    shop_ext = {s.external_id: s.id for s in db.scalars(select(Store).where(Store.company_id == cid, Store.external_id.isnot(None)))}
+    users = _by_ext(db, User, cid)
+    for bu in _pages(token, "/v1/user", "users", {"type": 1}):
+        if bu.get("deleted_at"):
+            continue
+        name = " ".join(x for x in (bu.get("first_name"), bu.get("last_name")) if x).strip() or "Сотрудник"
+        u = users.get(bu.get("id"))
+        if not u:
+            u = User(company_id=cid, name=name[:200], login=f"billz-{company.id}-{secrets.token_hex(3)}",
+                     password_hash=hash_password(secrets.token_urlsafe(24)), is_owner=False, is_active=False,
+                     external_id=bu.get("id"), store_ids=[])
+            db.add(u)
+            users[u.external_id] = u
+            rep["staff_created"] += 1
+        u.name = name[:200]
+        u.store_ids = [shop_ext[s.get("shop_id")] for s in bu.get("shops") or [] if s.get("shop_id") in shop_ext]
+    db.flush()
+    if rep["staff_created"]:
+        rep["notes"].append("Сотрудники перенесены выключенными: задайте каждому логин и пароль в разделе «Сотрудники» и включите.")
+
+
+def step_people(db: Session, company: Company, token: str, rep: dict) -> None:
+    cid = company.id
+    clients = list(db.scalars(select(Client).where(Client.company_id == cid)))
+    by_ext = {c.external_id: c for c in clients if c.external_id}
+    by_phone = {c.phone: c for c in clients if c.phone}
+    for bc in _pages(token, "/v1/client", "clients"):
+        name = " ".join(x for x in (bc.get("first_name"), bc.get("last_name")) if x).strip() or "Без имени"
+        phones = [_phone(x) for x in bc.get("phone_numbers") or [] if x]
+        phone = phones[0] if phones else None
+        c = by_ext.get(bc.get("id")) or (by_phone.get(phone) if phone else None)
+        if c:
+            rep["clients_updated"] += 1
+        else:
+            c = Client(company_id=cid, name=name[:200], phone=phone, tags=["BILLZ"])
+            db.add(c)
+            rep["clients_created"] += 1
+            if phone:
+                by_phone[phone] = c
+        c.external_id = bc.get("id")
+        by_ext[c.external_id] = c
+        c.name = name[:200]
+        c.phone = phone or c.phone
+        if len(phones) > 1:
+            extra = "Другие телефоны: " + ", ".join(phones[1:])
+            if extra not in (c.note or ""):
+                c.note = ((c.note + "\n") if c.note else "") + extra
+        c.bonus_balance = _dec(bc.get("balance"))
+        g = str(bc.get("gender") or "").lower()
+        c.gender = "m" if g in ("1", "male", "m") else "f" if g in ("2", "female", "f") else c.gender
+        try:
+            if bc.get("birth_date"):
+                c.birth_date = date.fromisoformat(str(bc["birth_date"])[:10])
+        except ValueError:
+            pass
+        made = _when(bc.get("created_at"), company.utc_offset_minutes)
+        if made:
+            c.created_at = made
+    db.flush()
+
+    sups = list(db.scalars(select(Supplier).where(Supplier.company_id == cid)))
+    s_ext = {s.external_id: s for s in sups if s.external_id}
+    s_name = {s.name.strip().lower(): s for s in sups}
+    for bs in _pages(token, "/v1/supplier", "suppliers"):
+        name = (bs.get("name") or "").strip()
+        if not name:
+            continue
+        s = s_ext.get(bs.get("id")) or s_name.get(name.lower())
+        if s:
+            rep["suppliers_updated"] += 1
+        else:
+            s = Supplier(company_id=cid, name=name[:200])
+            db.add(s)
+            s_name[name.lower()] = s
+            rep["suppliers_created"] += 1
+        s.external_id = bs.get("id")
+        phones = [_phone(x) for x in bs.get("phone_numbers") or [] if x]
+        s.phone = phones[0] if phones else s.phone
+        s.opening_balance = _dec(bs.get("debt_value"))  # наш долг поставщику на момент переноса
+    db.flush()
+
+
+def step_sales(db: Session, company: Company, token: str, rep: dict, month: str) -> None:
+    """Чеки одного месяца: шапка и оплаты — из отчёта транзакций, товары — из отчёта покупок."""
+    cid = company.id
+    try:
+        start = date.fromisoformat(month + "-01")
+    except ValueError:
+        raise HTTPException(422, "Месяц укажите в виде ГГГГ-ММ")
+    end = (start.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    rng = {"start_date": start.isoformat(), "end_date": end.isoformat()}
+    rows = _pages(token, "/v1/transaction-report-table", "rows", rng)
+    rep["month"], rep["month_transactions"] = month, len(rows)
+    if not rows:
+        return
+    lines: dict[str, list] = {}
+    for ln in _pages(token, "/v1/customer-purchases-table", "purchases", {**rng, "with_customers": "false"}):
+        lines.setdefault(ln.get("order_id"), []).append(ln)
+
+    stores = {s.external_id: s.id for s in db.scalars(select(Store).where(Store.company_id == cid, Store.external_id.isnot(None)))}
+    users = {u.external_id: u.id for u in db.scalars(select(User).where(User.company_id == cid, User.external_id.isnot(None)))}
+    owner = db.scalar(select(User.id).where(User.company_id == cid, User.is_owner.is_(True)).order_by(User.id))
+    clients = {c.external_id: c.id for c in db.scalars(select(Client).where(Client.company_id == cid, Client.external_id.isnot(None)))}
+    prods = list(db.scalars(select(Product).where(Product.company_id == cid)))
+    p_ext = {p.external_id: p for p in prods if p.external_id}
+    p_sku = {p.sku: p for p in prods if p.sku}
+    p_bar = {p.barcode: p for p in prods if p.barcode}
+    ids = [r.get("order_id") for r in rows if r.get("order_id")]
+    done = set(db.scalars(select(Sale.external_id).where(Sale.company_id == cid, Sale.external_id.in_(ids)))) if ids else set()
+    default_store = next(iter(stores.values()), None) or db.scalar(select(Store.id).where(Store.company_id == cid).order_by(Store.id))
+
+    def product_for(ln) -> Product:
+        p = p_ext.get(ln.get("product_id")) or p_sku.get(ln.get("product_sku") or "") or p_bar.get(ln.get("product_barcode") or "")
+        if not p:  # товар уже удалён в BILLZ — заводим архивную карточку, чтобы история не потерялась
+            p = Product(company_id=cid, name=(ln.get("product_name") or "Товар из BILLZ")[:300], external_id=ln.get("product_id"),
+                        unit=(ln.get("product_measurement_unit_short_name") or "шт")[:20], is_active=False)
+            db.add(p)
+            db.flush()
+            p_ext[p.external_id] = p
+        return p
+
+    for r in rows:
+        oid = r.get("order_id")
+        if not oid or oid in done:
+            rep["sales_skipped"] += 1
+            continue
+        done.add(oid)
+        kind = (r.get("order_type") or "SALE").upper()
+        when = _when(r.get("date"), company.utc_offset_minutes) or datetime.combine(start, datetime.min.time())
+        sellers = [users[s] for s in r.get("seller_ids") or [] if s in users]
+        cashier = users.get(r.get("cashier_id"))
+        seller = (sellers[0] if sellers else None) or cashier or owner
+        num_raw = str((lines.get(oid) or [{}])[0].get("order_number") or r.get("external_id") or "")
+        number = int(num_raw) if num_raw.isdigit() and len(num_raw) < 10 else None
+        if number is None:
+            company.receipt_counter += 1
+            number = company.receipt_counter
+        company.receipt_counter = max(company.receipt_counter, number)
+        sale = Sale(company_id=cid, number=number, store_id=stores.get(r.get("shop_id")) or default_store, seller_id=seller,
+                    created_by=cashier or seller, client_id=clients.get(r.get("customer_id")), external_id=oid,
+                    status="return" if kind == "RETURN" else "completed", comment=(r.get("comment") or None), created_at=when)
+        sub = tot = Decimal(0)
+        for ln in lines.get(oid) or []:
+            qty = _dec(ln.get("sold_measurement_value")) or _dec(ln.get("returned_measurement_value"))
+            if not qty:
+                continue
+            gross, net = abs(_dec(ln.get("gross_sales"))), abs(_dec(ln.get("net_sales")))
+            net = net or gross
+            p = product_for(ln)
+            sale.items.append(SaleItem(product_id=p.id, name=(ln.get("product_name") or p.name)[:300], is_service=p.is_service,
+                                       qty=abs(qty), price=(gross / abs(qty)).quantize(Decimal("0.01")),
+                                       cost_price=(abs(_dec(ln.get("net_sold_supply_sum"))) / abs(qty)).quantize(Decimal("0.01")),
+                                       discount=max(gross - net, Decimal(0)), total=net))
+            sub += gross
+            tot += net
+        pays = [(_method(pm.get("payment_type_name")), abs(_dec(pm.get("sum")))) for pm in r.get("payments") or []]
+        paid = sum((a for _, a in pays), Decimal(0))
+        tot = paid or tot or abs(_dec(r.get("gross_sales")))
+        sub = max(sub, abs(_dec(r.get("total_price"))), tot)
+        sale.subtotal, sale.total, sale.discount = sub, tot, max(sub - tot, Decimal(0))
+        for m, a in pays:
+            if a:
+                sale.payments.append(Payment(method=m, amount=a))
+        db.add(sale)
+        db.flush()
+        if kind == "RETURN":
+            db.add(SaleReturn(company_id=cid, sale_id=sale.id, store_id=sale.store_id, user_id=cashier or seller, amount=tot,
+                              refund_method=pays[0][0] if pays else "cash", reason="Возврат из BILLZ", created_at=when,
+                              items=[{"sale_item_id": i.id, "qty": float(i.qty), "amount": float(i.total)} for i in sale.items]))
+            rep["returns_created"] += 1
+        else:
+            rep["sales_created"] += 1
+
+
+def step_debts(db: Session, company: Company, token: str, rep: dict) -> None:
+    cid = company.id
+    clients = {c.external_id: c for c in db.scalars(select(Client).where(Client.company_id == cid, Client.external_id.isnot(None)))}
+    stores = {s.external_id: s.id for s in db.scalars(select(Store).where(Store.company_id == cid, Store.external_id.isnot(None)))}
+    sales = {s.external_id: s.id for s in db.scalars(select(Sale).where(Sale.company_id == cid, Sale.external_id.isnot(None)))}
+    debts = _by_ext(db, ClientDebt, cid)
+    touched = set()
+    for bd in _pages(token, "/v1/debt", "data"):
+        if bd.get("deleted_at"):
+            continue
+        cust = bd.get("customer") or {}
+        c = clients.get(cust.get("id"))
+        if not c:
+            name = (cust.get("name") or " ".join(x for x in (cust.get("first_name"), cust.get("last_name")) if x)).strip() or "Клиент из BILLZ"
+            phones = [_phone(x) for x in bd.get("contact_phones") or [] if x]
+            c = Client(company_id=cid, name=name[:200], phone=phones[0] if phones else None, tags=["BILLZ"], external_id=cust.get("id"))
+            db.add(c)
+            db.flush()
+            clients[c.external_id] = c
+            rep["clients_created"] += 1
+        d = debts.get(bd.get("id"))
+        if d:
+            rep["debts_updated"] += 1
+        else:
+            d = ClientDebt(company_id=cid, client_id=c.id, external_id=bd.get("id"), amount=Decimal(0))
+            db.add(d)
+            debts[d.external_id] = d
+            rep["debts_created"] += 1
+        d.client_id = c.id
+        d.amount, d.paid = _dec(bd.get("amount")), min(_dec(bd.get("paid_amount")), _dec(bd.get("amount")))
+        d.sale_id = sales.get(bd.get("order_id"))
+        d.store_id = stores.get((bd.get("shop") or {}).get("id"))
+        rd = _when(bd.get("repayment_date"), 0)
+        d.due_date = rd.date() if rd else None
+        d.note = (f"Чек BILLZ №{bd.get('order_number')}" if bd.get("order_number") else None) or (bd.get("comment") or None)
+        made = _when(bd.get("created_at"), company.utc_offset_minutes)
+        if made:
+            d.created_at = made
+        touched.add(c.id)
+    db.flush()
+    for client_id in touched:  # долг клиента = сумма непогашенных остатков его долгов
+        rows = db.scalars(select(ClientDebt).where(ClientDebt.client_id == client_id)).all()
+        db.get(Client, client_id).debt_balance = sum((Decimal(x.amount) - Decimal(x.paid) for x in rows), Decimal(0))
+
+
+def run(db: Session, company_id: int, secret_token: str, step: str = "all", month: str | None = None,
+        import_clients: bool = True) -> dict:
+    if step not in STEPS + ("all",):
+        raise HTTPException(422, "Неизвестный шаг переноса")
+    token = _login(secret_token)
+    company = db.get(Company, company_id)
+    rep = _report()
+    todo = ("catalog", "staff", "people", "debts") if step == "all" else (step,)
+    for s in todo:
+        if s == "people" and not import_clients:
+            continue
+        if s == "sales":
+            step_sales(db, company, token, rep, month or date.today().strftime("%Y-%m"))
+        else:
+            globals()["step_" + s](db, company, token, rep)
     db.commit()
     return rep
